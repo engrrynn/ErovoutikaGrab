@@ -549,3 +549,45 @@ Two comprehensive, publication-ready markdown documents were created in `human_i
    - Slew-rate motion dynamics ($\pm 35$ PWM/step), stiction jump (240 PWM), and 4-threaded XNNPACK LiteRT inference architecture.
    - Standard Operating Procedures (SOP) for Arduino flashing, Golden OS image deployment, and a 10-point End-of-Line (EOL) factory QA checklist.
    - Includes a 13-slide technical presentation script for Google Slides.
+
+---
+
+## 13. VLM Plan-First Motion Planning & Stutter Elimination (2026-10-02)
+
+### 13.1 Root Cause of Stutter
+1. **Camera Ego-Motion**: Driving forward caused bounding boxes to expand in the frame, falsely triggering `target_is_moving = True` for stationary targets.
+2. **Stiction Brake Drop**: Under moving-target mode, commands throttled down to $40\%$ PWM (~92 PWM). Because floor static friction requires ~220–240 PWM to overcome inertia, 92 PWM acted as a dead-stop electric brake on every vision loop iteration, causing severe physical shuddering.
+
+### 13.2 Plan-First Kinematic Path Architecture
+1. **`VLMMotionPlanner` (`src/planning/vlm_motion_planner.py`)**:
+   - Plans complete motion trajectory before motors receive power.
+   - Dual-branch: Physical ground distance error $\Delta d = dist\_cm - target\_dist\_cm$.
+     * **Over-extension Protection ($\Delta d < -4\text{ cm}$)**: `is_overextended = True`, commands `REVERSE_CLEAR`.
+     * **Standoff Hold ($|\Delta d| \le 4\text{ cm}$)**: Smooth halt at 0 PWM, `HOLD_STANDOFF`.
+     * **Continuous Smooth Approach ($\Delta d > 4\text{ cm}$)**: Smooth differential arc steering with distance damping.
+2. **Continuous Drive Integration**: `_execute_gated_pulse` with `continuous_drive=True` eliminates blocking `sleep()` and 40% PWM stall cuts. The 20–30 Hz vision loop operates as a non-blocking closed-loop feedback controller.
+3. **Multi-Activity Standard**: Applied across `person_follower`, `color_tracking`, `object_tracking`, `color_track_and_classify`, `object_sizing`, and `obstacle_avoidance`.
+
+---
+
+## 14. Mass Production Portability & Automated Installer (2026-10-02)
+
+### 14.1 One-Command Installer (`install.sh` & `setup.sh`)
+- Automated end-to-end setup script for fresh Raspberry Pi 5 / Pi 4 boards running Raspberry Pi OS (Debian 12 Bookworm / Debian 13 Trixie 64-bit).
+- **Automated Capabilities**:
+  1. **Pre-flight**: 64-bit ARM (`aarch64`) verification and disk space assertion ($\ge 3\text{ GB}$ free).
+  2. **APT Dependencies**: `python3-opencv`, `python3-pyqt5`, `python3-serial`, `python3-yaml`, `python3-requests`, `v4l-utils`, `bluez`, `rfcomm`, `network-manager`, `libcap2-bin`.
+  3. **Hardware & Overlays**: Auto-configures `/boot/firmware/config.txt` (`camera_auto_detect=1`, `display_auto_detect=1`, `dtoverlay=vc4-kms-v3d`, `arm_boost=1`).
+  4. **Permissions & Sudoers**: Hardware group assignments (`dialout`, `video`, `netdev`, `bluetooth`, `i2c`, `spi`, `gpio`, `render`) and passwordless `rfcomm` rule in `/etc/sudoers.d/020_egrabbot_rfcomm`.
+  5. **Python Stack**: PEP 668 compliant automated pip installation (`ai-edge-litert`, `ultralytics`, `requests`, `pyyaml`).
+  6. **SSL Certificates**: Auto-generates 10-year self-signed TLS certificates for `egrabbot.local`.
+  7. **Systemd Services**: Auto-configures and enables `egrabbot-web.service`, `egrabbot-wifi-init.service`, and `rfcomm-bind.service`.
+  8. **Desktop HUD Shortcut**: Automatically provisions `ErovoutikaGrab_HUD.desktop` with application icon on user's desktop.
+  9. **Health Verification**: Runs automated import tests, camera checks, Bluetooth status, and pytest unit suite.
+
+### 14.2 Storage Footprint
+- **Total System Directory**: 1.46 GB (1490.87 MB).
+  - Code, configs, tests, scripts, assets, manuals: ~4.9 MB.
+  - Model weights in `models/` (19 YOLO11 TFLite & YOLOe PyTorch models): 671.78 MB (all strictly $< 91\text{ MB}$, within GitHub limits).
+  - MobileCLIP TorchScript weights (`mobileclip_blt.ts` 572 MB, `mobileclip2_b.ts` 242 MB): Ignored from Git due to GitHub 100 MB per-file upload limit.
+- **Git Repository Size**: 676.8 MB (103 tracked files committed on branch `main`).
