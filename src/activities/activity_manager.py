@@ -111,6 +111,8 @@ class ActivityManager:
         self._is_grabbing: bool = False
         self._arm_settling: bool = False
         self._arm_settle_until: float = 0.0
+        self._arm_deploy_event: threading.Event = threading.Event()
+        self._arm_deploy_event.set()  # starts as ready (no blocking)
 
         # Obstacle avoidance Arm IK Environmental Scan state
         self._oa_scan_state: str = "IDLE"
@@ -1025,21 +1027,34 @@ class ActivityManager:
             self.telemetry["details"] = f"Initializing {clean_name.replace('_', ' ').title()}..."
 
             # Position servo arm at start:
-            # - Object & color tracking: arm DOWN pose FIRST before detecting
+            # - Object & color tracking: arm DOWN pose FIRST, hard-block detection until settled
             # - Human following: arm UP at start (stowed upright pose for walking clearance)
             if clean_name in ("object_tracking", "color_tracking", "color_track_and_classify", "object_sizing"):
                 already_down = (self._arm_last_s1 == 170 and self._arm_last_s2 == 0)
-                self.set_arm_down(open_gripper=True, force=True)
-                settle_dur = 0.2 if already_down else 1.4
+                # Hard-block: clear the event so both perception and activity threads wait
+                self._arm_deploy_event.clear()
                 self._arm_settling = True
+                self.set_arm_down(open_gripper=True, force=True)
+                # Arduino firmware moves 1°/20ms: S1 77° + S2 45° ≈ 1.54s. Use 1.8s for safety.
+                settle_dur = 0.25 if already_down else 1.8
                 self._arm_settle_until = time.time() + settle_dur
                 self.telemetry["status"] = "DEPLOYING_ARM"
                 self.telemetry["action"] = "LOWERING_ARM"
-                self.telemetry["details"] = "Lowering servo arm to ground grasp pose before starting detection..."
+                self.telemetry["details"] = f"Lowering servo arm to ground grasp pose ({settle_dur:.1f}s)... Detection blocked until complete."
+
+                # Deferred release: a short-lived thread that sleeps for the full settle duration,
+                # then fires the event so both _perception_worker and _activity_loop unblock atomically.
+                def _arm_settle_release(dur: float):
+                    time.sleep(dur)
+                    self._arm_settling = False
+                    self._arm_deploy_event.set()
+                    print(f"[Activities] Arm settled after {dur:.1f}s — detection unblocked.")
+                threading.Thread(target=_arm_settle_release, args=(settle_dur,), daemon=True).start()
             elif clean_name in ("person_follower", "obstacle_avoidance"):
                 self.set_arm_up(force=True)
                 self._arm_settling = False
                 self._arm_settle_until = 0.0
+                self._arm_deploy_event.set()  # ensure no block
 
             # Launch asynchronous perception worker for high-throughput tracking
             if clean_name in ("person_follower", "object_tracking", "color_track_and_classify") and self.camera and self.vision:
@@ -1053,13 +1068,10 @@ class ActivityManager:
 
     def _perception_worker(self):
         """Asynchronous vision perception worker that runs detection in background to sustain high framerate."""
+        # Hard-block: wait for arm deployment to complete before ANY detection
+        self._arm_deploy_event.wait()
+
         while self.running:
-            # Wait for arm to finish deploying to down pose before starting detection
-            if getattr(self, "_arm_settling", False):
-                if time.time() < getattr(self, "_arm_settle_until", 0.0):
-                    time.sleep(0.05)
-                    continue
-                self._arm_settling = False
 
             act = self.active_activity
             if act not in ("person_follower", "object_tracking", "color_track_and_classify"):
@@ -1114,6 +1126,7 @@ class ActivityManager:
         self._last_cmd_r = 0
         self._arm_settling = False
         self._arm_settle_until = 0.0
+        self._arm_deploy_event.set()  # release any threads blocked on arm deploy wait
         self._perception_thread = None
         with self._vision_lock:
             self._latest_detections = []
@@ -1191,21 +1204,20 @@ class ActivityManager:
         """Background control loop running at ~15-20 Hz."""
         last_seen_time = 0.0
 
+        # Hard-block: wait for arm deployment to complete before ANY detection or driving.
+        # Motors are held stopped. The _arm_settle_release thread fires the event when done.
+        if self._arm_settling:
+            self.telemetry["status"] = "DEPLOYING_ARM"
+            self.telemetry["action"] = "LOWERING_ARM"
+            self.telemetry["details"] = "Arm deploying to ground pose — detection blocked until settled."
+            if self.comm:
+                try:
+                    self.comm.send_stop()
+                except Exception:
+                    pass
+            self._arm_deploy_event.wait()
+
         while self.running:
-            # Wait for arm to finish deploying to down pose before starting detection
-            if getattr(self, "_arm_settling", False):
-                if time.time() < getattr(self, "_arm_settle_until", 0.0):
-                    self.telemetry["status"] = "DEPLOYING_ARM"
-                    self.telemetry["action"] = "LOWERING_ARM"
-                    self.telemetry["details"] = "Lowering servo arm to ground grasp pose before starting detection..."
-                    if self.comm:
-                        try:
-                            self.comm.send_stop()
-                        except Exception:
-                            pass
-                    time.sleep(0.05)
-                    continue
-                self._arm_settling = False
 
             t0 = time.time()
             frame = None
