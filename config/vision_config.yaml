@@ -1,0 +1,94 @@
+activities:
+  color_track_and_classify:
+    color: Green
+    follow_speed: 200
+    target_area: 10
+  color_tracking:
+    color: Red
+    follow_speed: 215
+    target_area: 12
+  motion_enabled: true
+  object_sizing:
+    align_speed: 195
+    filter_object: bottle
+    inspection_dist: 30
+  object_tracking:
+    follow_speed: 205
+    target_dist: 40
+    target_object: bottle
+  obstacle_avoidance:
+    cruise_speed: 210
+    score_threshold: 25
+    turn_speed: 230
+  person_follower:
+    follow_speed: 225
+    target_dist: 45
+camera:
+  adapter_type: v4l2
+  auto_exposure: true
+  device_index: 0
+  fourcc: MJPG
+  fps: 30
+  height: 480
+  width: 640
+color_detection:
+  core_crop_ratio: 0.6
+  enabled: true
+grasp_sweet_spot:
+  align_tolerance_x: 20
+  align_tolerance_y: 25
+  box_height: 157
+  box_width: 196
+  center_x: 324
+  center_y: 247
+tracker:
+  min_confidence: 0.6
+  reacquire_interval_frames: 45
+  type: CSRT
+yoloe:
+  confidence_threshold: 0.25
+  enforce_limitations: false
+  imgsz: 320
+  model_path: models/yoloe-11l-seg-pf.pt
+  num_threads: 4
+  pickable_classes:
+  - bottle
+  - cup
+  - bowl
+  - banana
+  - apple
+  - sandwich
+  - orange
+  - broccoli
+  - carrot
+  - hot dog
+  - pizza
+  - donut
+  - cake
+  - backpack
+  - umbrella
+  - handbag
+  - suitcase
+  - frisbee
+  - sports ball
+  - kite
+  - baseball bat
+  - baseball glove
+  - skateboard
+  - surfboard
+  - tennis racket
+  - book
+  - clock
+  - vase
+  - scissors
+  - teddy bear
+  - toothbrush
+  - cell phone
+  - remote
+  - keyboard
+  - mouse
+  - laptop
+  - fork
+  - knife
+  - spoon
+  - wine glass

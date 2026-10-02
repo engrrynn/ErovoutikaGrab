@@ -1,0 +1,14 @@
+[Unit]
+Description=Bind Bluetooth RFCOMM0 for ErovoutikaGrab Arduino
+After=bluetooth.service
+Requires=bluetooth.service
+Before=egrabbot-web.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/rfcomm bind 0 20:25:08:00:46:FB 1
+ExecStop=/usr/bin/rfcomm release 0
+
+[Install]
+WantedBy=multi-user.target

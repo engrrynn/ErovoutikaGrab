@@ -1,0 +1,24 @@
+# ==============================================================================
+# ErovoutikaGrab Python Requirements
+# ==============================================================================
+# For optimal performance and GPU/V4L2 hardware acceleration on Raspberry Pi,
+# core system bindings can be installed via apt:
+# sudo apt install python3-opencv python3-pyqt5 python3-serial python3-yaml python3-pytest python3-requests python3-numpy
+# ==============================================================================
+
+# Core Hardware, Serial, & Configuration
+pyyaml>=6.0
+pyserial>=3.5
+requests>=2.31
+numpy>=1.24.0
+
+# User Interface (Desktop HUD View-Only Kiosk)
+PyQt5>=5.15.0
+
+# Testing & Quality Assurance
+pytest>=8.0.0
+
+# AI Vision: Google LiteRT & Ultralytics YOLOE
+ultralytics>=8.3.0
+ai-edge-litert>=2.1.4
+pillow>=10.0.0

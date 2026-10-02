@@ -1,0 +1,1 @@
+egrabbot ALL=(ALL) NOPASSWD: /usr/bin/rfcomm

@@ -1,0 +1,14 @@
+[Unit]
+Description=E-GrabBot Wireless & Hotspot Mode Startup Initializer
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/egrabbot/ErovoutikaGrab
+ExecStart=/usr/bin/python3 /home/egrabbot/ErovoutikaGrab/scripts/wifi_manager.py init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

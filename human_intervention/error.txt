@@ -1,0 +1,186 @@
+[15975:16037:0926/173118.397255:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: QUOTA_EXCEEDED
+
+
+The gripper should open and close regardless if its stow or down 
+
+
+watchdog not happening 
+
+watchdog operational 1 degree increment decrement
+
+web interface html css and js system service restart 
+automatic
+
+vision system not accurate not optimized
+visual servoing lags not smooth
+
+there should be linkage of centroid 
+
+
+overshooting of motor turn - fixed by motor calibration
+
+
+the test blocks the prompt
+
+human following not accurate - fixed by hierarchical leg-prioritized ground plane tracking, bipedal fusion, and continuous arc steering
+
+
+
+
+
+31: the human following is still not accurate and i dont see the linkage, the color detection makes the robot wobble just to make the object centered there should be a diminishing pwm adjust but going to the baseline, the object detection doesnt detect any object and the color and object classifier detects some color and identifies but not all of it so its not accurate in color, the object sizing is not accurate, the obstacle avoidance is not detecting object properly and sometimes it detects something not there
+- RESOLUTION:
+  1. Object detection detects nothing: Fixed NameError on uninitialized `too_large`/`too_small` in `yoloe_adapter.py` when `enforce_limitations: false`. Both LiteRT and PyTorch engines now execute and return detections.
+  2. Visual linkage line: Restored on `/video_feed` HUD across all autonomous activities (person follower, color tracking, object tracking, sizing), connecting grasp sweet-spot crosshair to active target centroid/anchor.
+  3. Wobble elimination: Implemented `_compute_diminishing_turn_pwm` in `activity_manager.py` that scales turn PWM from 248 down to 228 (baseline stiction floor) as error approaches deadband, plus EMA smoothing on centroids.
+  4. Color detection & classification accuracy: Lowered monochrome gray saturation threshold from 40 to 20, lowered black threshold, expanded HSV ranges for indoor lighting in both `color_detector.py` and `activity_manager.py`, and added Cyan range.
+  5. Object sizing accuracy: Added perspective-depth correction factor (`dist_factor = target_h / max(0.08, height_ratio)`) so physical dimensions remain stable across distances.
+  
+  
+
+
+what i notice is that it moves while not being able to think yet or detect what is infront, so it should move or pulse move whenever it reads what is infront of the camera,  in this way it does not overshoot, optimize every model to perfect the detection of each available model like what was done with yolo 11 seg pf, but make sure it fits that model, in the activities there should be a toggle if the robot should move towards it or just detect, whats infront, the obstacle avoidance is innacurate about the distance actually all of them, fix this 
+the vlm should be implemented always why is there a plan with vlm and execute planned pulse and arm it should already apply and keep adjusting when an activity starts because the vlm must have its own log to learn and adapt
+- RESOLUTION:
+  1. Sense-Think-Act Gated Pulse Motion: Replaced continuous driving in `src/activities/activity_manager.py` with `_execute_gated_pulse(lpwm, rpwm, duration_s, settle_s)`. Chassis only moves in bounded pulses (80-180ms) executed strictly after capturing and processing the camera frame, immediately followed by active electric braking (`send_drive(0,0)`) and 40ms chassis settling before capturing the next frame. Eliminates blind overshooting.
+  2. Multi-Model Architecture Optimization: Universalized `LiteRTEngine` in `src/adapters/vision/yoloe_adapter.py` with architecture-specific tensor decoding. Auto-detects SSD MobileNet / EfficientDet format (normalized bounding boxes `[0, 1]`, 90-class COCO mapping with 0=person, 27=umbrella) vs YOLO dense format (8400 anchors, quantization dequantization, OpenCV NMS, 80 COCO classes). All 19 models in `models/` (SSD MobileNet, EfficientDet, YOLO11 nano/small/medium/large TFLite, and YOLOE nano/small/medium/large PyTorch standard & pre-fused) load and detect accurately.
+  3. Activity Chassis Motion Toggle: Added `motion_enabled` setting, `toggle_motion(enabled)` method, `POST /api/activities/toggle_motion` endpoint, and Cockpit UI toggle button (`[ 🚗 AUTONOMOUS DRIVE ]` vs `[ 👁️ JUST DETECT (STATIONARY) ]`). In Detect-Only mode, vision, visual servoing linkage, and object sizing run at full speed without chassis driving. HUD displays `[DETECT ONLY]` badge.
+  4. Physically Grounded Distance Calibration: Added `estimate_ground_distance(bottom_y, frame_h)` using pinhole trigonometry ($H_{cam}=14\text{cm}, \theta_{tilt}=16^\circ, f_y \approx 460\text{px}$). Obstacle avoidance now accurately measures floor contact distance across Left, Center, and Right corridors in centimeters (`L: __cm | C: __cm | R: __cm`), eliminating phantom obstacles and inaccurate proximity. Displayed live on HUD across all activities.
+  5. Permanent VLM Integration & Continuous Adaptation Log: Wired `vlm_planner` into `ActivityManager.set_dependencies(...)`. Every activity cycle automatically generates physical motion plans and records feedback (error delta, PWM, pulse duration). Implemented `logs/vlm_adaptation_log.jsonl`, dynamic stiction boost recovery (+2 PWM on stall), adaptive damping/pulse scaling (0.88x on overshoot), and `/api/vlm/adaptation_log` telemetry endpoint. All 23 activity tests pass.
+
+
+  when in stationary mode the robot should still be able to turn sideways and the arm must be able to follow the object and center it using up and down like an inverse kinematics like movement
+  - RESOLUTION:
+    1. Stationary Sideways Turning: Updated `_execute_gated_pulse` in `src/activities/activity_manager.py`. When `motion_enabled: False`, forward and reverse driving (`lpwm == rpwm`) is completely halted (`send_drive(0,0)`), while lateral steering (`lpwm != rpwm`) executes stationary pivot turns in place (`turn_speed, -turn_speed` or `-turn_speed, turn_speed`), allowing the robot to center targets horizontally in front of the camera without translating.
+    2. Arm Elevation Tracking (IK-like Pitch): Implemented `_track_arm_elevation(cy, h, latency_s)` in `src/activities/activity_manager.py`. S1 (shoulder) and S2 (elbow) pitch up/down to center the target at the camera sweet spot (52% H): target low in frame -> arm reaches down toward `s1_down` (170°) and `s2_down` (0°); target high in frame -> arm pitches up toward `s1_min` (60°) and `s2_stow` (45°). All angles strictly adhere to `robot_config.yaml` bounds.
+    3. Latency Synchronization: Servo update commands are throttled to measured latency $\Delta t_{lat}$ (camera + vision + VLM cycle) and slew-rate micro-stepped (1-4° per pulse) synchronized with the hardware servo stepper rate (1°/20ms in `egrabbot.ino`), eliminating lag starvation, overshoot, and hunting. Wired across all 5 activity step functions.
+    4. HUD & Telemetry: Live Arm IK status (`ARM IK: S1:__° S2:__° [STATUS] (__ms)`) is streamed on `/video_feed` and telemetry dictionary.
+
+  why is there still a manual button for vlm in the web ui
+  - RESOLUTION:
+    1. Removed manual action buttons ("Ask VLM to Plan", "Execute Planned Pulse", "Execute Arm Grasp") from the VLM planner card.
+    2. Set `vlm_auto_advisory = True` by default in `scripts/web_interface.py`. VLM physical reasoning, anti-overshoot damping, and trajectory planning run automatically in the background across all activities.
+    3. Replaced with an active status badge (`● CONTINUOUS ADAPTATION ALWAYS ON`) and direct log link button (`📜 View Adaptation Log` -> `/api/vlm/adaptation_log`).
+
+  the sizing in the object sizer is innacurate and includes sceneries it should be centered or used on objects only
+  - RESOLUTION:
+    1. Added `SCENERY_CLASSES` exclusion filter in `_step_object_sizing` (`src/activities/activity_manager.py`): rejects walls, floors, ceilings, ground, sky, rooms, windows, doors, buildings, people, chairs, tables, beds, couches, and plants when sizing tabletop objects.
+    2. Rejects oversized background candidates spanning > 60% of frame area or > 85% width/height.
+    3. Added Center Sweet-Spot Proximity scoring: Candidates are scored by horizontal and vertical closeness to optical center axis (`cx_img`, `h * 0.52`) and confidence rather than raw area.
+    4. Stored `target_polygon` in telemetry and rendered full segmentation polygon overlay on HUD.
+
+  whenever an activity is started the default vision system with contour should disable first and then continue working when the activity is halted
+  - RESOLUTION:
+    1. In `scripts/web_interface.py` `_vision_worker()`: Background vision inference thread sleeps and yields camera and inference completely when `activity_manager.running` is True.
+    2. In `/video_feed`: Default YOLOE bounding boxes, mask polygons, and crosshair linkage lines are hidden during active activities, cleanly displaying only the active activity's dedicated HUD.
+    3. Default contours and linkage lines automatically resume as soon as the activity halts.
+
+  fix the obstacle avoidance its still not accurate it should be contoured also alongside with all the other activities
+  - RESOLUTION:
+    1. In `_step_obstacle_avoidance` (`src/activities/activity_manager.py`): Extracted solid obstacle polygon contours from Canny edge corridor mask (`clean_edges`) with Y-offset to frame coordinates.
+    2. Added `contours` list to `self.telemetry["obstacle"]`.
+    3. In `/video_feed`: Renders real-time red polygon contours for all detected corridor obstacles alongside zone threat boxes and pinhole distance readouts.
+
+  about erovoutika another panel in the ui in reference to this website https://www.erovoutika.ph/
+  - RESOLUTION:
+    1. Created dedicated `tab-about` ("🌐 About Erovoutika") in the web cockpit navigation.
+    2. Includes official company profile, innovation mission, core competencies (Autonomous Robotics, Industrial Automation, Electronics Design, Edge AI), E-GrabBot v2.0 hardware architecture specifications, contact details (info@erovoutika.ph), and direct external link to `https://www.erovoutika.ph/`.
+
+  wifi selector panel wifi scanner and password typing
+  egrabbot access point hotspot upon startup by default and can change and connect to wifi using the web ui and can also switch back to access point in the web ui
+  - RESOLUTION:
+    1. Created `scripts/wifi_manager.py` and `config/network_config.yaml` supporting both Access Point Hotspot mode (`egrabbot-ap`, pass: `egrabbot1234`, IP: `10.42.0.1`) and WiFi Client Station mode.
+    2. Created systemd service `egrabbot-wifi-init.service` enabled to enforce default startup mode (default: `startup_mode: "ap"`).
+    3. Added `tab-network` ("📶 WiFi & Hotspot") to web cockpit with:
+       - Live network status (Active Mode, SSID, IP address, Signal strength bar, Security).
+       - Bootup default mode selector (Access Point Hotspot vs WiFi Client Station).
+       - WiFi scanner with real-time discovery of nearby 2.4/5GHz networks and clickable selection.
+       - Password input with show/hide toggle and connect button.
+       - One-click "Switch to E-GrabBot Hotspot Mode" controller.
+    4. Endpoints implemented: `GET /api/wifi/status`, `GET /api/wifi/scan`, `POST /api/wifi/connect`, `POST /api/wifi/hotspot`, `POST /api/wifi/startup_mode`.
+
+
+    the pulse movement should be smooth if the vlm detects that the object is not moving proceed fast smooth movement if it moves have pulse but it should not stutter
+    
+    the number looks different in the desktop hud make it normal
+
+    the wifi and ap switch and connection of existing wifi must be seamless but dont remove the default boot whether its ap boot or wifi boot
+    ❌ Failed to connect: Error: 802-11-wireless-security.key-mgmt: property is missing.
+    - RESOLUTION:
+      1. Stationary vs. Moving Target Dynamics & Stutter-Free Movement:
+         - Added `_evaluate_target_dynamics(cx, cy, now)` with speed hysteresis (<20 px/s stationary, >32 px/s moving) in `src/activities/activity_manager.py`.
+         - Updated `VLMMotionPlan` and `_compute_kinematic_plan` in `src/planning/vlm_motion_planner.py` to accept `target_is_moving` and assign `movement_mode` ("SMOOTH_FAST" vs "SMOOTH_PULSE").
+         - In `_execute_gated_pulse`:
+           * When target is stationary: executes fast, smooth continuous motion (`send_drive(cmd_l, cmd_r)`) without zero-braking pauses between perception frames.
+           * When target is moving: executes responsive pulses with slew-rate transition, then gently eases to glide speed without slamming the active zero-brake, eliminating mechanical gearbox stutter.
+           * When starting from standstill: jumps directly to overcome stiction floor; rate-limits transitions while moving by 35 PWM/step.
+         - Wired across all 5 autonomous activities (`person_follower`, `color_tracking`, `object_tracking`, `color_track_and_classify`, `object_sizing`).
+      2. Normal Typography on Desktop HUD & Cockpit Numbers:
+         - Removed `Noto Color Emoji` from preceding `sans-serif` in global CSS font stack (`scripts/web_interface.py`).
+         - Enforced clean system proportional fonts (`'Liberation Sans', 'DejaVu Sans', sans-serif`) with `letter-spacing: normal !important; font-variant-numeric: normal !important;` across `#lcd_hud_container`, `.lcd-hud-stat-val`, `.lcd-pill-badge`, `.lcd-gauge-val-xl`, and `.lcd-gauge-sub-xl`.
+         - Verified with screen capture (`desktop_hud_typography_verified.png`): digits render cleanly (`93° / 45° / 169°`, `0 / 0`, `58%`).
+      3. Seamless WiFi & AP Switching & Key-Mgmt Fix:
+         - Added `get_saved_wifi_connections()` in `scripts/wifi_manager.py` to identify pre-existing NetworkManager connection profiles.
+         - In `connect_to_wifi()`: Cleanly brings down `egrabbot-hotspot` before connecting. For saved networks, connects directly via `nmcli con up <ssid>` without requiring password re-entry.
+         - For new or password-provided networks, explicitly specifies `802-11-wireless-security.key-mgmt wpa-psk`, eliminating the `key-mgmt: property is missing` error.
+         - Preserves `startup_mode` in `config/network_config.yaml` during runtime network switching so user boot preferences (`ap` or `wifi`) are never overridden.
+         - Updated web UI to display green `★ SAVED` badges on known networks and auto-fill connection instructions. All 35 tests pass.
+
+    the camera has problems when starting activity
+    - RESOLUTION:
+      1. Fixed `UnboundLocalError: cannot access local variable 'box_color' where it is not associated with a value` in `scripts/web_interface.py` line 4590:
+         - `box_color` was uninitialized for `object_tracking`, `color_tracking`, and `color_track_and_classify`. When any target box was detected upon starting an activity, `cv2.rectangle` threw an exception, terminating the `/video_feed` socket stream and breaking the client/kiosk display.
+         - Initialized `box_color = (0, 255, 0)` by default and mapped distinct colors: `(56, 189, 248)` for object tracking, `(0, 255, 128)` for color tracking/classification, `(0, 255, 255)` for sizing.
+      2. Clamped bounding box coordinates (`ymin, xmin, ymax, xmax`) within image bounds `[0, vis.shape]`, guarding against degenerate single-point rectangles.
+      3. Wrapped the entire activity overlay drawing block in `try...except Exception as act_draw_err:` so that no overlay rendering anomaly can ever crash or terminate the MJPEG camera stream.
+      4. Verified live with `live_activity_camera_verified.png`: video stream runs continuously with live bounding boxes, sweet spot crosshair, and activity telemetry without dropping frames.
+
+    User Manual & Mass Production Documentation Request
+    - RESOLUTION:
+      1. Created `human_intervention/USER_MANUAL_OPERATION_GUIDE.md`:
+         - Complete, plain-language operating manual for non-technical users and Google Slides generation.
+         - Explicitly clarifies that ErovoutikaGrab is an intelligent Visual Categorizer and assistive mobile manipulator, NOT an industrial sorting machine.
+         - Highlights that manual arm control is preferred for fine manipulation, safety, and delicate handling.
+         - Defines the exact physical and visual criteria required for automated grabbing (sweet-spot alignment, verified 30–40 cm distance, stationary target).
+         - Comprehensive detail-by-detail walkthrough of all activities (Human Following, Object Tracking, Color Tracking, Color Track & Classify, Object Sizing, Obstacle Avoidance, Movement Queueing, Phone Voice Control, Exhibit Mode).
+         - Contains a 13-slide presentation blueprint formatted for Gemini in Google Slides.
+      2. Created `human_intervention/TECHNICAL_MASS_PRODUCTION_SPECIFICATION.md`:
+         - Full industrial engineering specification for hardware assembly, mass production, and firmware/software deployment.
+         - Complete Bill of Materials (BOM) with part numbers and electrical parameters (RPi 5, Arduino Nano, TB6612FNG, HC-05, V4L2 camera, MG996R/MG90S servos, 2S/3S Li-ion battery).
+         - Comprehensive pinout matrix, star grounding, logic-vs-servo rail isolation, and 470uF decoupling filters.
+         - Non-blocking ASCII framed UART protocol, 1500 ms watchdog failsafe, directional joint priority, and strict S2 <= 45° mechanical clamp.
+         - Edge AI LiteRT + YOLOE multi-tier pipeline, sub-millisecond HSV color classifier, target dynamics velocity hysteresis, and slew-rate motion smoothing.
+         - Standard Operating Procedures (SOP) for Arduino flashing, Golden OS image deployment, and a 10-point factory End-of-Line (EOL) QA test sheet.
+         - Contains a 13-slide technical presentation blueprint formatted for Gemini in Google Slides.
+
+
+    Stuttery Motion & VLM Plan-First Continuous Trajectory Execution
+    - PROBLEM:
+      1. Robot exhibited physical motor stuttering and jerky chattering during visual pursuit activities.
+      2. Root Cause Analysis:
+         a. Ego-Motion Optical Pollution: Driving forward caused target bounding boxes to grow dynamically in the camera frame, mistakenly tripping `target_is_moving = True` even when the target was completely stationary.
+         b. Dead-Stop Electric Braking: When `target_is_moving` triggered, `_execute_gated_pulse` injected a blocking `time.sleep()` and throttled motor commands down to `cmd * 0.40`. Because static friction requires ~220–240 PWM to overcome inertia, the 40% speed drop (~92 PWM) acted as a harsh electric brake, stopping the motors dead on every single frame.
+         c. Lack of Global Motion Planning: The robot reacted purely on single-frame errors without a planned trajectory, leading to overshoot, overextension, and oscillation.
+    - RESOLUTION:
+      1. Ego-Motion Compensated Target Dynamics (`src/activities/activity_manager.py`):
+         - `_evaluate_target_dynamics`: When the chassis is moving (`_last_cmd_l != 0`), vertical looming due to forward motion is discounted. The system strictly analyzes lateral pixel velocity ($|x_1 - x_0| / \Delta t > 40\text{ px/s}$) to distinguish true target motion from robot ego-motion.
+      2. Plan-First VLM Motion Planner (`src/planning/vlm_motion_planner.py`):
+         - Enhanced `VLMMotionPlanner` with dual-branch kinematic path planning before any motor actuation.
+         - Physical Distance & Standoff Regulation:
+           * Over-extension Protection ($dist\_error < -4\text{ cm}$): Sets `is_overextended = True`, triggers `REVERSE_CLEAR`, smoothly backing away from collision or pinch zones.
+           * Standoff Hold ($|dist\_error| \le 4\text{ cm}$): Safely holds standoff distance at 0 PWM without overshoot.
+           * Continuous Smooth Approach ($dist\_error > 4\text{ cm}$): Calculates continuous differential PWM with dynamic distance-based damping and arc steering for simultaneous centering and approach.
+         - Outputs `left_pwm`, `right_pwm`, `continuous_drive`, `path_type`, and `is_overextended`.
+      3. Elimination of PWM Brake Drops & Non-blocking Closed-loop Control:
+         - Updated `_execute_gated_pulse`: When `continuous_drive=True`, commands the motors smoothly and directly without blocking `time.sleep()` in the vision loop and completely eliminates the 40% PWM stall drop. The 20–30 Hz vision loop acts as a continuous closed-loop feedback controller.
+      4. Universal Activity Integration:
+         - Integrated the VLM-first planning pattern across all 5 tracking and measurement activities:
+           * `person_follower`
+           * `color_tracking`
+           * `object_tracking`
+           * `color_track_and_classify`
+           * `object_sizing`
+           * `obstacle_avoidance` (continuous drive during clear cruise)
+      5. Verification & Test Suite:
+         - All 39 unit and integration tests passing (`tests/test_vlm_motion_planner.py` + `tests/test_activities.py`).
+         - Restarted `egrabbot-web.service` and verified live telemetry stream.

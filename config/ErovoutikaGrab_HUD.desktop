@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ErovoutikaGrab HUD
+Comment=Fullscreen View-Only Robot HUD & Instrument Cluster
+Exec=/home/egrabbot/ErovoutikaGrab/scripts/launch_desktop_gui.py
+Icon=/home/egrabbot/ErovoutikaGrab/company_asset/Erovoutika-Light-Logo-1.webp
+Terminal=false
+Categories=Utility;Robotics;

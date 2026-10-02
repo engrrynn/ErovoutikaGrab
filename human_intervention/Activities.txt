@@ -1,0 +1,23 @@
+EDGE DEVICE 
+
+|| ACTIVITIES OF EGRAB BOT ||
+
+Human Following /
+Object Tracking /
+Color Tracking /
+Color Track and Object Classification /
+Object Sizing /
+Simple Obstacle Avoidance Cam Version /
+
+Movement Sequence Queueing 
+Voice Control Using Phone
+Exhibit Mode
+
+|| USER EDITABLE SETTINGS ||
+
+Servo Pose
+Motor Speed 
+Camera Calibration 
+
+AP Mode
+Same Network Mode

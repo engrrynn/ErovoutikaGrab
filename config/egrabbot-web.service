@@ -1,0 +1,17 @@
+[Unit]
+Description=ErovoutikaGrab Web Teleoperation & Calibration Dashboard
+After=network.target bluetooth.target rfcomm-bind.service
+Wants=rfcomm-bind.service
+
+[Service]
+Type=simple
+User=egrabbot
+WorkingDirectory=/home/egrabbot/ErovoutikaGrab
+ExecStart=/usr/bin/python3 /home/egrabbot/ErovoutikaGrab/scripts/web_interface.py --port 5001
+Restart=always
+RestartSec=3
+KillMode=mixed
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

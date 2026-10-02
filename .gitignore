@@ -1,0 +1,54 @@
+# ==============================================================================
+# ErovoutikaGrab .gitignore
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches and test coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
+
+# Virtual environments
+.venv
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Runtime logs and ephemeral data
+logs/*.log
+logs/*.jsonl
+!logs/.gitkeep
+data/*.jpg
+data/*.png
+!data/arm_state.json
+
+# Temporary frame dumps & test images
+test_frame.jpg
+*.tmp
+
+# Large Model Weights exceeding GitHub's 100MB per-file upload limit
+# (TorchScript MobileCLIP weights: mobileclip_blt.ts ~572MB, mobileclip2_b.ts ~242MB)
+*.ts
+*.tar.gz
+*.zip
+*.img
+*.iso
+*.gz
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak

@@ -1,0 +1,38 @@
+communication:
+  baud_rate: 9600
+  bluetooth_mac: 20:25:08:00:46:FB
+  rfcomm_channel: 1
+  serial_port: /dev/rfcomm0
+motors:
+  base_speed: 230
+  max_speed: 255
+  min_overcoming_pwm: 240
+  nudge_default_ms: 250
+  nudge_pwm: 250
+  swap_left_right: true
+  trim_offset: 6
+  turn_speed: 228
+servos:
+  lead_deg: 0
+  servo1_shoulder:
+    center_angle: 93
+    down_angle: 170
+    max_angle: 170
+    min_angle: 60
+    stow_angle: 93
+    up_angle: 93
+  servo2_elbow:
+    center_angle: 45
+    down_angle: 0
+    max_angle: 45
+    min_angle: 0
+    stow_angle: 45
+    up_angle: 45
+  servo3_gripper:
+    center_angle: 170
+    close_angle: 40
+    max_angle: 170
+    min_angle: 40
+    open_angle: 170
+  step_deg: 2
+  step_delay_s: 0.02
