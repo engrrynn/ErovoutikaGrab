@@ -12,10 +12,10 @@
       "vase",
       "aqua"
     ],
-    "target_distance_cm": 15.0,
+    "target_distance_cm": 13.5,
     "standoff_band_cm": [
-      -12.0,
-      6.0
+      -3.0,
+      2.0
     ],
     "grasp_zone": "waist",
     "ideal_box_width_px": 122,
@@ -23,7 +23,7 @@
     "aspect_ratio": 2.05,
     "clamp_angle_deg": 52,
     "sweet_spot_offset_y": 0.65,
-    "approach_ground_y_px": 440,
+    "approach_ground_y_px": 455,
     "description": "Upright cleaning spray bottle with trigger nozzle. Grasp waist body at 65% height to clear trigger head; clamp firmly at 52°.",
     "shoulder_down_deg": 170,
     "elbow_down_deg": 0,

@@ -711,10 +711,13 @@ class VLMMotionPlanner:
         standoff_min = -12.0
         standoff_max = 6.0
         if profile and "target_distance_cm" in profile:
-            if target_dist_cm is None or abs(target_dist_cm - 30.0) < 1.0 or target_dist_cm <= 0:
+            if target_dist_cm is None or abs(target_dist_cm - 30.0) < 1.0 or abs(target_dist_cm - 40.0) < 1.0 or abs(target_dist_cm - 14.0) < 1.0 or target_dist_cm <= 0:
                 effective_target_dist = float(profile["target_distance_cm"])
             if "standoff_band_cm" in profile:
                 standoff_min, standoff_max = profile["standoff_band_cm"]
+        elif effective_target_dist is not None and effective_target_dist <= 15.0:
+            standoff_min = -3.0
+            standoff_max = 2.0
 
         # ------------------------------------------------------------------
         # BRANCH 1: PHYSICAL DISTANCE PATH PLANNING (When distance is measured)
@@ -910,7 +913,10 @@ class VLMMotionPlanner:
         # BRANCH 2: SWEET-SPOT AREA RATIO PATH PLANNING (Unit test & camera fallback)
         # ------------------------------------------------------------------
         # Scenario 1: Already inside sweet-spot zone or in front ground pick reach (Ready for Servo Arm Grasp)
-        is_ground_reach = (ymax >= 320)
+        approach_ground_y = 445
+        if profile and "approach_ground_y_px" in profile:
+            approach_ground_y = int(profile["approach_ground_y_px"])
+        is_ground_reach = (ymax >= approach_ground_y)
         if is_centered and (0.85 <= area_ratio <= 1.18 or is_ground_reach):
             arm_plan = self._compute_arm_plan("ALIGNED_GRASP", category, box_w, sw, area_ratio, is_centered, bbox=bbox)
             grip_target = arm_plan["calibrated_angles"]["grip_target"]

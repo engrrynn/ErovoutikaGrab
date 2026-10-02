@@ -14,7 +14,7 @@ activities:
     inspection_dist: 30
   object_tracking:
     follow_speed: 205
-    target_dist: 40
+    target_dist: 14
     target_object: bottle
   obstacle_avoidance:
     cruise_speed: 210

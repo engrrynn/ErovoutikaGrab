@@ -1569,7 +1569,7 @@ class ActivityManager:
             b_speed = self._get_base_speed()
             f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
-            target_dist = float(self.config.get("color_target_distance_cm", 25.0))
+            target_dist = float(self.config.get("color_target_distance_cm", 14.0))
 
             # Evaluate target dynamics (Moving vs Stationary Target)
             is_moving = self._evaluate_target_dynamics(cx, cy, now)
@@ -1687,7 +1687,7 @@ class ActivityManager:
             # If target is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
+            is_near = (dist_cm <= target_dist + 2.0) or (dist_cm <= 15.5) or (int(y + bh) >= 445)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")
@@ -1876,7 +1876,7 @@ class ActivityManager:
             b_speed = self._get_base_speed()
             f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
-            target_dist = float(self.config.get("object_target_distance_cm", 30.0))
+            target_dist = float(self.config.get("object_target_distance_cm", self.config.get("target_distance_cm", 14.0)))
 
             # Evaluate target dynamics (Moving vs Stationary Target)
             is_moving = self._evaluate_target_dynamics(px_center, target_cy, now)
@@ -1998,7 +1998,7 @@ class ActivityManager:
             # If target object is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
+            is_near = (dist_cm <= target_dist + 2.0) or (dist_cm <= 15.5) or (ymax >= 445)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")
@@ -2200,7 +2200,7 @@ class ActivityManager:
             b_speed = self._get_base_speed()
             f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
-            target_dist = float(self.config.get("color_target_distance_cm", 25.0))
+            target_dist = float(self.config.get("color_target_distance_cm", 14.0))
 
             # Evaluate target dynamics (Moving vs Stationary Target)
             is_moving = self._evaluate_target_dynamics(cx, cy, now)
@@ -2318,7 +2318,7 @@ class ActivityManager:
             # If target is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
+            is_near = (dist_cm <= target_dist + 2.0) or (dist_cm <= 15.5) or (int(y + bh) >= 445)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")

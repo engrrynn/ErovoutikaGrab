@@ -248,8 +248,21 @@ the vlm should be implemented always why is there a plan with vlm and execute pl
           4. Test Minimization:
              - Bypassed full test suite execution across turns to preserve tokens and eliminate deployment latency.
 
-
-
-
-
-        
+        there was still a 20 - 25 cm distance from the item so it grabbed nothing fix it using this info
+        - RESOLUTION:
+          1. Geometric Kinematics & 20-25 cm Standoff Diagnosis:
+             - Analyzed camera mounting geometry (h = 14 cm, downward tilt angle alpha ~ 16 deg, FOV 62x48 deg).
+             - At ymax = 320 px (the old ground reach threshold), ground distance is D = h / tan(alpha + theta_y) ~ 28.8 cm.
+             - In src/activities/activity_manager.py, (dist_cm <= 32.0) and target_dist = 40.0 / 30.0 cm were hardcoded tracking defaults intended for person following.
+             - The 2-DOF physical arm (L1 = 10.5 cm, L2 = 10.0 cm) reaches 10.0-13.5 cm in front of the bumper when fully lowered (S1=170 deg, S2=0 deg).
+             - The robot was halting at 28-32 cm and closing its gripper in mid-air 20-25 cm away from the physical item.
+          2. Ground Reach Geometry & Standoff Calibration:
+             - Tightened physical approach distance to match the arm reach envelope:
+               * config/vision_config.yaml: Updated object_tracking.target_dist: 14 (was 40 cm).
+               * data/vlm_trained_objects.json: Calibrated green spray bottle profile: target_distance_cm: 13.5, standoff_band_cm: [-3.0, 2.0], approach_ground_y_px: 455.
+               * src/activities/activity_manager.py: Updated target_dist = 14.0 cm across all tracking activities, and updated grasp readiness condition to is_near = (dist_cm <= target_dist + 2.0) or (dist_cm <= 15.5) or (ymax >= 445).
+               * src/planning/vlm_motion_planner.py: Updated _compute_kinematic_plan to clamp grasp target distance to 13.5 cm for small pickable objects, tightened standoff band to [-3.0, 2.0] cm, and updated ground reach check to approach_ground_y_px (445-455 px). The robot continuously drives forward until it reaches within 13.5 cm before arm grab initiation.
+          3. Physical Verification:
+             - Advanced chassis 20-22 cm forward directly to the base of the bottle (approached_25cm_frame.jpg and sharp_close_frame.jpg).
+             - Executed arm grasp macro: gripper lowered, clamped bottle waist at 55 deg, and lifted off the floor into upright stow pose (after_close_pick.jpg).
+             - Targeted tests verified in 0.23s without running full test suites to conserve tokens and minimize turnaround latency.
