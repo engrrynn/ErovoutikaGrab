@@ -4,7 +4,7 @@ communication:
   rfcomm_channel: 1
   serial_port: /dev/rfcomm0
 motors:
-  base_speed: 230
+  base_speed: 235
   max_speed: 255
   min_overcoming_pwm: 240
   nudge_default_ms: 250

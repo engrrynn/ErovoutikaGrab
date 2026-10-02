@@ -799,3 +799,70 @@ def test_linkage_centering_to_calibrated_sweet_spot():
     manager.stop_activity()
 
 
+def test_base_speed_floor_constraint_forward_and_backward():
+    """Verify that baseline drive speed from robot_config.yaml is the hard floor for all forward and backward actions."""
+    manager = ActivityManager()
+    base_floor = manager._get_base_speed()
+    assert base_floor >= 235
+
+    # 1. Approach Cruise Stage (Forward): both wheels >= base_floor
+    plan_fwd = manager._plan_linkage_trajectory(
+        target_name="bottle",
+        cx=324,
+        cy=247,
+        w=640,
+        h=480,
+        dist_cm=60.0,
+        target_dist_cm=30.0,
+        is_moving=False
+    )
+    approach_stage = plan_fwd["stages"][0]
+    assert approach_stage["action"] == "APPROACH"
+    assert approach_stage["left_pwm"] >= base_floor
+    assert approach_stage["right_pwm"] >= base_floor
+
+    # 2. Reverse Clear Stage (Backward): both wheels <= -base_floor
+    plan_rev = manager._plan_linkage_trajectory(
+        target_name="bottle",
+        cx=324,
+        cy=247,
+        w=640,
+        h=480,
+        dist_cm=15.0,
+        target_dist_cm=30.0,
+        is_moving=False
+    )
+    rev_stage = plan_rev["stages"][0]
+    assert rev_stage["action"] == "BACK_UP"
+    assert rev_stage["left_pwm"] <= -base_floor
+    assert rev_stage["right_pwm"] <= -base_floor
+
+    # 3. Hardware Pulse Gate Floor Enforcement
+    comm = MockCommAdapter()
+    comm.connect()
+    manager.comm = comm
+    manager.toggle_motion(True)
+
+    # Attempt to command forward drive below base_floor (e.g. 150 PWM)
+    comm.command_log.clear()
+    manager._last_cmd_l = 0
+    manager._last_cmd_r = 0
+    manager._execute_gated_pulse(150, 150, duration_s=0.05, is_target_moving=False, continuous_drive=False)
+    assert len(comm.command_log) > 0
+    cmd_fwd = comm.command_log[-1]
+    # Trim offset may adjust by +/- trim, but magnitude must be grounded at base_floor
+    assert cmd_fwd[1] >= (base_floor - 10)
+    assert cmd_fwd[2] >= (base_floor - 10)
+
+    # Attempt to command backward drive below base_floor in reverse (e.g. -150 PWM)
+    comm.command_log.clear()
+    manager._last_cmd_l = 0
+    manager._last_cmd_r = 0
+    manager._execute_gated_pulse(-150, -150, duration_s=0.05, is_target_moving=False, continuous_drive=False)
+    assert len(comm.command_log) > 0
+    cmd_rev = comm.command_log[-1]
+    assert cmd_rev[1] <= -(base_floor - 10)
+    assert cmd_rev[2] <= -(base_floor - 10)
+
+
+

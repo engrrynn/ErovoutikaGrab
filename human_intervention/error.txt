@@ -221,3 +221,9 @@ the vlm should be implemented always why is there a plan with vlm and execute pl
           in autonomous mode make the vlm do everything to center match the linkage to the sweet spot crosshair the same with stationary mode use the servo arm and turning mechanism
         
         the turn speed set in the robot config should be the baseline speed no less but it can be more 
+
+
+
+        Next Improvement:
+
+        apply the basespeed from robot config no less even in forward and backward not just in turn speed no less 

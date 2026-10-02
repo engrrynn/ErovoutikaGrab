@@ -7,7 +7,7 @@ activities:
     color: Red
     follow_speed: 215
     target_area: 12
-  motion_enabled: false
+  motion_enabled: true
   object_sizing:
     align_speed: 195
     filter_object: bottle

@@ -73,10 +73,10 @@ if os.path.exists(ROBOT_CONFIG_PATH):
 
 vlm_auto_advisory = True
 vlm_planner = VLMMotionPlanner(
-    min_overcoming_pwm=int(_init_motors.get("min_overcoming_pwm", 230)),
-    base_speed=int(_init_motors.get("base_speed", 230)),
-    turn_speed=int(_init_motors.get("turn_speed", 228)),
-    nudge_pwm=int(_init_motors.get("nudge_pwm", 245)),
+    min_overcoming_pwm=int(_init_motors.get("min_overcoming_pwm", 240)),
+    base_speed=int(_init_motors.get("base_speed", 235)),
+    turn_speed=int(_init_motors.get("turn_speed", 235)),
+    nudge_pwm=int(_init_motors.get("nudge_pwm", 250)),
     nudge_default_ms=int(_init_motors.get("nudge_default_ms", 250)),
     max_speed=int(_init_motors.get("max_speed", 255)),
     align_tol_x=20,
@@ -142,14 +142,14 @@ yoloe_state = {
 # Calibration & Teleop State
 current_spot = {"center_x": 324, "center_y": 247, "box_width": 256, "box_height": 231}
 motor_state = {
-    "base_speed": 225,
-    "turn_speed": 240,
-    "min_overcoming_pwm": 230,
-    "nudge_pwm": 245,
-    "nudge_default_ms": 250,
-    "trim_offset": 6,
-    "max_speed": 255,
-    "swap_left_right": True
+    "base_speed": int(_init_motors.get("base_speed", 235)),
+    "turn_speed": int(_init_motors.get("turn_speed", 235)),
+    "min_overcoming_pwm": int(_init_motors.get("min_overcoming_pwm", 240)),
+    "nudge_pwm": int(_init_motors.get("nudge_pwm", 250)),
+    "nudge_default_ms": int(_init_motors.get("nudge_default_ms", 250)),
+    "trim_offset": int(_init_motors.get("trim_offset", 6)),
+    "max_speed": int(_init_motors.get("max_speed", 255)),
+    "swap_left_right": bool(_init_motors.get("swap_left_right", True))
 }
 servo_state = {
     "live_s1": 93,
@@ -5133,8 +5133,8 @@ class WebHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/drive_dir":
             data = self._read_json()
             direction = data.get("dir", "S")
-            base = motor_state.get("base_speed", 225)
-            turn = motor_state.get("turn_speed", 240)
+            base = max(235, int(motor_state.get("base_speed", 235)))
+            turn = max(235, int(motor_state.get("turn_speed", 235)))
             trim = motor_state.get("trim_offset", 6)
 
             left, right = 0, 0

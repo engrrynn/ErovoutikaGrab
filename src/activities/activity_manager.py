@@ -247,6 +247,26 @@ class ActivityManager:
             baseline = max(baseline, 235)
         return max(235, baseline)
 
+    def _get_base_speed(self) -> int:
+        """Reads configured baseline drive speed floor from robot_config.yaml or self.config.
+        
+        The base speed set in robot_config.yaml is the hard baseline floor constraint (never less, even in forward and backward).
+        """
+        baseline = int(self.config.get("base_speed", 0))
+        rc_path = os.path.join(BASE_DIR, "config/robot_config.yaml")
+        if os.path.exists(rc_path):
+            try:
+                import yaml
+                with open(rc_path, "r") as f:
+                    cfg = yaml.safe_load(f) or {}
+                mcfg = cfg.get("motors", {})
+                baseline = max(baseline, int(mcfg.get("base_speed", 235)))
+            except Exception:
+                baseline = max(baseline, 235)
+        else:
+            baseline = max(baseline, 235)
+        return max(235, baseline)
+
     def _get_sweet_spot(self, w: int = 640, h: int = 480) -> Tuple[int, int]:
         """Returns calibrated (center_x, center_y) grasp sweet spot crosshair, scaled to frame resolution."""
         sx = int(self.config.get("sweet_spot_x", 0))
@@ -501,7 +521,8 @@ class ActivityManager:
         ey = cy - sy
         dist_err = dist_cm - target_dist_cm
         deadband_x = int(self.config.get("deadband_x", 30))
-        f_speed = max(210, int(self.config.get("follow_speed", 230)))
+        b_speed = self._get_base_speed()
+        f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
         t_speed = self._get_turn_speed()
 
         # 1. Arm IK Target Pose Calculation
@@ -537,9 +558,9 @@ class ActivityManager:
                 # Continuous Arc Steering Stage
                 steer_bias = int(min(25, (err_mag / float(w // 2)) * 25))
                 if dx > 0:
-                    l_arc, r_arc = min(255, max(t_speed, f_speed + steer_bias)), max(180, f_speed - steer_bias * 2)
+                    l_arc, r_arc = min(255, max(t_speed, f_speed + steer_bias)), max(b_speed, f_speed - steer_bias * 2)
                 else:
-                    l_arc, r_arc = max(180, f_speed - steer_bias * 2), min(255, max(t_speed, f_speed + steer_bias))
+                    l_arc, r_arc = max(b_speed, f_speed - steer_bias * 2), min(255, max(t_speed, f_speed + steer_bias))
                 stages.append({
                     "stage": 1,
                     "name": f"ARC_ALIGN_{turn_dir}",
@@ -745,6 +766,38 @@ class ActivityManager:
                 self._last_cmd_l = 0
                 self._last_cmd_r = 0
             return
+
+        # Hard baseline speed floor constraints from robot_config.yaml:
+        # Never less than base_speed for forward/backward and never less than turn_speed for turning!
+        b_speed = self._get_base_speed()
+        t_speed = self._get_turn_speed()
+
+        if lpwm > 0 and rpwm > 0:
+            # Forward drive: both wheels must be at least base_speed
+            lpwm = max(b_speed, lpwm)
+            rpwm = max(b_speed, rpwm)
+        elif lpwm < 0 and rpwm < 0:
+            # Backward drive: both wheels must be at least base_speed in reverse magnitude
+            lpwm = min(-b_speed, lpwm)
+            rpwm = min(-b_speed, rpwm)
+        elif (lpwm > 0 and rpwm < 0) or (lpwm < 0 and rpwm > 0):
+            # Pivot turn: both wheels must be at least turn_speed in magnitude
+            if lpwm > 0:
+                lpwm = max(t_speed, lpwm)
+                rpwm = min(-t_speed, rpwm)
+            else:
+                lpwm = min(-t_speed, lpwm)
+                rpwm = max(t_speed, rpwm)
+        elif lpwm != 0 or rpwm != 0:
+            # Single-wheel / differential forward/backward drive:
+            if lpwm > 0:
+                lpwm = max(b_speed, lpwm)
+            elif lpwm < 0:
+                lpwm = min(-b_speed, lpwm)
+            if rpwm > 0:
+                rpwm = max(b_speed, rpwm)
+            elif rpwm < 0:
+                rpwm = min(-b_speed, rpwm)
 
         # Slew-rate transition: when starting from stop, jump to target to overcome stiction; while moving, smooth transitions
         max_slew = 35
@@ -1223,7 +1276,8 @@ class ActivityManager:
                 dist_action = "ALIGNED"
 
             deadband_x = int(self.config.get("deadband_x", 30))
-            f_speed = max(230, int(self.config.get("follow_speed", 230)))
+            b_speed = self._get_base_speed()
+            f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             t_speed = self._get_turn_speed()
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             pulse_dur = 0.12
@@ -1279,7 +1333,14 @@ class ActivityManager:
                     continuous_drive = True
                     pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
 
-                # Hard turn speed floor guarantee
+                # Hard turn and base speed floor guarantees from robot config
+                if "FORWARD" in action or "APPROACH" in action or "CRUISE" in action:
+                    if left_pwm > 0: left_pwm = max(b_speed, left_pwm)
+                    if right_pwm > 0: right_pwm = max(b_speed, right_pwm)
+                elif "BACK" in action or "REVERSE" in action:
+                    if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
+                    if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
+
                 if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
@@ -1309,7 +1370,7 @@ class ActivityManager:
                         if dist_action == "APPROACH":
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
                             left_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            right_pwm = max(180, f_speed - steer_bias * 2)
+                            right_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = turn_pwm, -turn_pwm
@@ -1318,7 +1379,7 @@ class ActivityManager:
                         if dist_action == "APPROACH":
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
                             right_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            left_pwm = max(180, f_speed - steer_bias * 2)
+                            left_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = -turn_pwm, turn_pwm
@@ -1499,7 +1560,8 @@ class ActivityManager:
             self.telemetry["target_size"] = round(dist_cm, 1)
 
             t_speed = self._get_turn_speed()
-            f_speed = max(230, int(self.config.get("follow_speed", 230)))
+            b_speed = self._get_base_speed()
+            f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             target_dist = float(self.config.get("color_target_distance_cm", 25.0))
 
@@ -1552,7 +1614,14 @@ class ActivityManager:
                     continuous_drive = True
                     pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
 
-                # Hard turn speed floor guarantee
+                # Hard turn and base speed floor guarantees from robot config
+                if "FORWARD" in action or "APPROACH" in action or "CRUISE" in action:
+                    if left_pwm > 0: left_pwm = max(b_speed, left_pwm)
+                    if right_pwm > 0: right_pwm = max(b_speed, right_pwm)
+                elif "BACK" in action or "REVERSE" in action:
+                    if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
+                    if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
+
                 if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
@@ -1582,7 +1651,7 @@ class ActivityManager:
                         if area_ratio < target_area_ratio:
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
                             left_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            right_pwm = max(180, f_speed - steer_bias * 2)
+                            right_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = turn_pwm, -turn_pwm
@@ -1591,7 +1660,7 @@ class ActivityManager:
                         if area_ratio < target_area_ratio:
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
                             right_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            left_pwm = max(180, f_speed - steer_bias * 2)
+                            left_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = -turn_pwm, turn_pwm
@@ -1791,7 +1860,8 @@ class ActivityManager:
             self.telemetry["target_size"] = round(dist_cm, 1)
 
             t_speed = self._get_turn_speed()
-            f_speed = max(230, int(self.config.get("follow_speed", 230)))
+            b_speed = self._get_base_speed()
+            f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             target_dist = float(self.config.get("object_target_distance_cm", 30.0))
 
@@ -1844,7 +1914,14 @@ class ActivityManager:
                     continuous_drive = True
                     pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
 
-                # Hard turn speed floor guarantee
+                # Hard turn and base speed floor guarantees from robot config
+                if "FORWARD" in action or "APPROACH" in action or "CRUISE" in action:
+                    if left_pwm > 0: left_pwm = max(b_speed, left_pwm)
+                    if right_pwm > 0: right_pwm = max(b_speed, right_pwm)
+                elif "BACK" in action or "REVERSE" in action:
+                    if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
+                    if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
+
                 if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
@@ -1874,7 +1951,7 @@ class ActivityManager:
                         if height_ratio < (target_h - h_tol):
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
                             left_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            right_pwm = max(180, f_speed - steer_bias * 2)
+                            right_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = turn_pwm, -turn_pwm
@@ -1883,7 +1960,7 @@ class ActivityManager:
                         if height_ratio < (target_h - h_tol):
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
                             right_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            left_pwm = max(180, f_speed - steer_bias * 2)
+                            left_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = -turn_pwm, turn_pwm
@@ -2102,7 +2179,8 @@ class ActivityManager:
             self.telemetry["target_size"] = round(dist_cm, 1)
 
             t_speed = self._get_turn_speed()
-            f_speed = max(230, int(self.config.get("follow_speed", 230)))
+            b_speed = self._get_base_speed()
+            f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             target_dist = float(self.config.get("color_target_distance_cm", 25.0))
 
@@ -2155,7 +2233,14 @@ class ActivityManager:
                     continuous_drive = True
                     pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
 
-                # Hard turn speed floor guarantee
+                # Hard turn and base speed floor guarantees from robot config
+                if "FORWARD" in action or "APPROACH" in action or "CRUISE" in action:
+                    if left_pwm > 0: left_pwm = max(b_speed, left_pwm)
+                    if right_pwm > 0: right_pwm = max(b_speed, right_pwm)
+                elif "BACK" in action or "REVERSE" in action:
+                    if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
+                    if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
+
                 if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
@@ -2185,7 +2270,7 @@ class ActivityManager:
                         if area_ratio < target_area_ratio:
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
                             left_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            right_pwm = max(180, f_speed - steer_bias * 2)
+                            right_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = turn_pwm, -turn_pwm
@@ -2194,7 +2279,7 @@ class ActivityManager:
                         if area_ratio < target_area_ratio:
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
                             right_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            left_pwm = max(180, f_speed - steer_bias * 2)
+                            left_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = -turn_pwm, turn_pwm
@@ -2407,7 +2492,8 @@ class ActivityManager:
             }
 
             t_speed = self._get_turn_speed()
-            f_speed = max(230, int(self.config.get("follow_speed", 230)))
+            b_speed = self._get_base_speed()
+            f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             target_dist = float(self.config.get("sizing_target_distance_cm", 28.0))
 
@@ -2442,7 +2528,14 @@ class ActivityManager:
                 continuous_drive = vlm_plan.continuous_drive
                 pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
 
-                # Hard turn speed floor guarantee
+                # Hard turn and base speed floor guarantees from robot config
+                if "FORWARD" in action or "APPROACH" in action or "CRUISE" in action or "MEASURE" in action:
+                    if left_pwm > 0: left_pwm = max(b_speed, left_pwm)
+                    if right_pwm > 0: right_pwm = max(b_speed, right_pwm)
+                elif "BACK" in action or "REVERSE" in action:
+                    if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
+                    if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
+
                 if "TURN" in action or "CENTER" in action or "PIVOT" in action:
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
@@ -2624,7 +2717,8 @@ class ActivityManager:
         blocked_c = (score_c >= thresh) or (dist_c < 28.0)
         blocked_r = (score_r >= thresh) or (dist_r < 28.0)
 
-        c_speed = max(230, int(self.config.get("obstacle_cruise_speed", 230)))
+        b_speed = self._get_base_speed()
+        c_speed = max(b_speed, int(self.config.get("obstacle_cruise_speed", 235)))
         t_speed = max(self._get_turn_speed(), int(self.config.get("obstacle_turn_speed", 235)))
 
         # 4. Reactive Avoidance State Machine with Arm IK Environmental Scan
@@ -2691,18 +2785,18 @@ class ActivityManager:
             action = "VEER_RIGHT"
             clear_path = "RIGHT_FORWARD"
             left_pwm = min(255, c_speed + 15)
-            right_pwm = max(180, c_speed - 25)
+            right_pwm = max(b_speed, c_speed - 25)
             left_pwm, right_pwm = self._apply_trim_direct(left_pwm, right_pwm)
         elif blocked_r and not blocked_l:
             action = "VEER_LEFT"
             clear_path = "LEFT_FORWARD"
-            left_pwm = max(180, c_speed - 25)
+            left_pwm = max(b_speed, c_speed - 25)
             right_pwm = min(255, c_speed + 15)
             left_pwm, right_pwm = self._apply_trim_direct(left_pwm, right_pwm)
         else:
             action = "CAUTIOUS_FORWARD"
             clear_path = "NARROW_CENTER"
-            left_pwm, right_pwm = self._apply_trim(max(170, c_speed - 20))
+            left_pwm, right_pwm = self._apply_trim(c_speed)
 
         is_motion = self.config.get("motion_enabled", True)
         if not is_motion:
