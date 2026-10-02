@@ -89,7 +89,7 @@ class VLMMotionPlanner:
         vlm_model: str = "moondream:latest",
         min_overcoming_pwm: int = 230,
         base_speed: int = 230,
-        turn_speed: int = 228,
+        turn_speed: int = 235,
         nudge_pwm: int = 245,
         nudge_default_ms: int = 250,
         max_speed: int = 255,
@@ -524,8 +524,8 @@ class VLMMotionPlanner:
         if dist_cm is not None and target_dist_cm is not None and dist_cm > 0:
             dist_error = dist_cm - target_dist_cm
 
-            # Scenario 1A: Over-extended past target standoff (closer than threshold!)
-            if dist_error < -4.0:
+            # Scenario 1A: Truly over-extended dangerously close under robot bumper (<12cm from standoff)
+            if dist_error < -12.0:
                 damping = 0.85
                 adjusted_pwm = max(self.min_overcoming_pwm, min(self.max_speed, round(self.base_speed * damping)))
                 arm_plan = self._compute_arm_plan("NUDGE_BACK", category, box_w, sw, area_ratio, is_centered)
@@ -552,14 +552,14 @@ class VLMMotionPlanner:
                     target_info=target_info,
                     arm_plan=arm_plan,
                     rationale=(
-                        f"Over-extension detected: Target at {dist_cm:.1f}cm is closer than standoff threshold {target_dist_cm:.1f}cm. "
+                        f"Over-extension detected: Target at {dist_cm:.1f}cm is under bumper clearance. "
                         f"Executing controlled reverse clear at {adjusted_pwm} PWM to restore safety clearance."
                     ),
                     source="VLM_KINEMATIC"
                 )
 
-            # Scenario 1B: Standoff Goal Reached (within target window ±4cm)
-            if abs(dist_error) <= 4.0:
+            # Scenario 1B: Standoff Goal Reached & Graspable Sweet-Spot Band (-12cm to +6cm)
+            if -12.0 <= dist_error <= 6.0:
                 action_name = "ALIGNED_GRASP" if is_centered else "ALIGNED_HOLD"
                 arm_plan = self._compute_arm_plan(action_name, category, box_w, sw, area_ratio, is_centered)
                 return VLMMotionPlan(
@@ -585,8 +585,8 @@ class VLMMotionPlanner:
                     target_info=target_info,
                     arm_plan=arm_plan,
                     rationale=(
-                        f"Target reached efficient standoff: Current {dist_cm:.1f}cm matches desired {target_dist_cm:.1f}cm (dx={dx:+d}px). "
-                        f"Holding position smoothly without over-extending."
+                        f"Target in calibrated grasp zone: Current {dist_cm:.1f}cm (target {target_dist_cm:.1f}cm, dx={dx:+d}px). "
+                        f"Arm IK settled in sweet spot, ready for decisive grasp."
                     ),
                     source="VLM_KINEMATIC"
                 )
@@ -675,7 +675,7 @@ class VLMMotionPlanner:
                     source="VLM_KINEMATIC"
                 )
             else:
-                turn_pwm = max(self.min_overcoming_pwm, min(self.max_speed, self.turn_speed))
+                turn_pwm = max(self.turn_speed, max(self.min_overcoming_pwm, min(self.max_speed, self.turn_speed)))
                 action_name = f"PIVOT_{turn_dir}"
                 l_cmd = turn_pwm if dx > 0 else -turn_pwm
                 r_cmd = -turn_pwm if dx > 0 else turn_pwm
@@ -782,7 +782,7 @@ class VLMMotionPlanner:
             if abs(dx) <= self.pulse_threshold_px:
                 action_name = f"NUDGE_{turn_dir}"
                 duration = max(50, min(120, int(self.nudge_default_ms * (abs(dx) / self.align_tol_x))))
-                adjusted_pwm = max(self.min_overcoming_pwm, min(self.max_speed, self.nudge_pwm))
+                adjusted_pwm = max(self.turn_speed, max(self.min_overcoming_pwm, min(self.max_speed, self.nudge_pwm)))
                 arm_plan = self._compute_arm_plan(action_name, category, box_w, sw, area_ratio, is_centered)
                 l_cmd = adjusted_pwm if dx > 0 else -adjusted_pwm
                 r_cmd = -adjusted_pwm if dx > 0 else adjusted_pwm
@@ -814,7 +814,7 @@ class VLMMotionPlanner:
                 )
             else:
                 action_name = f"PIVOT_{turn_dir}"
-                turn_pwm = max(self.min_overcoming_pwm, min(self.max_speed, self.turn_speed))
+                turn_pwm = max(self.turn_speed, max(self.min_overcoming_pwm, min(self.max_speed, self.turn_speed)))
                 arm_plan = self._compute_arm_plan(action_name, category, box_w, sw, area_ratio, is_centered)
                 l_cmd = turn_pwm if dx > 0 else -turn_pwm
                 r_cmd = -turn_pwm if dx > 0 else turn_pwm
@@ -984,8 +984,8 @@ class VLMMotionPlanner:
             outcome = "PROGRESS"
             notes = ""
 
-            # Check for overshoot (error crossed zero and flipped sign by significant margin)
-            is_overshoot = (prev_dx > 15 and new_dx < -15) or (prev_dx < -15 and new_dx > 15)
+            # Check for overshoot (error crossed zero and flipped sign by significant margin outside tolerance)
+            is_overshoot = (prev_dx > 25 and new_dx < -25) or (prev_dx < -25 and new_dx > 25)
             # Check for stiction stall (error did not change despite motor pulse)
             is_stall = (abs(delta_err) <= 3) and (prev_err > self.align_tol_x)
 

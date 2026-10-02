@@ -48,6 +48,20 @@ HSV_COLOR_RANGES = {
     ],
 }
 
+
+def get_hsv_ranges(color_name: str) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Case-insensitive HSV range lookup with safe fallback to Red."""
+    if not color_name:
+        return HSV_COLOR_RANGES["Red"]
+    clean = str(color_name).strip().capitalize()
+    if clean in HSV_COLOR_RANGES:
+        return HSV_COLOR_RANGES[clean]
+    for k, v in HSV_COLOR_RANGES.items():
+        if k.lower() == clean.lower():
+            return v
+    return HSV_COLOR_RANGES["Red"]
+
+
 # Standard metric conversion baseline calibrated to gripper landing sweet spot
 # Reference: At standard ground landing distance, 256px sweet spot width = ~80mm gripper span.
 MM_PER_PIXEL_SWEET_SPOT = 80.0 / 256.0  # ~0.3125 mm/pixel
@@ -82,10 +96,23 @@ class ActivityManager:
         self._ct_ema_y: Optional[float] = None
         self._ot_ema_x: Optional[float] = None
 
+        # Target spatial locking & persistence (Camera locks on what it sees first)
+        self._locked_target_center: Optional[Tuple[int, int]] = None
+        self._locked_target_label: Optional[str] = None
+        self._locked_target_lost_frames: int = 0
+        self._locked_target_frames: int = 0
+
         # Arm tracking state & latency synchronization
         self._arm_last_s1: Optional[int] = None
         self._arm_last_s2: Optional[int] = None
         self._arm_last_update_time: float = 0.0
+        self._arm_holding: bool = False
+        self._ik_settled_frames: int = 0
+        self._is_grabbing: bool = False
+
+        # Obstacle avoidance Arm IK Environmental Scan state
+        self._oa_scan_state: str = "IDLE"
+        self._oa_scan_start_t: float = 0.0
 
         # Target dynamics tracking (Moving vs Stationary Target Detection & Slew Rate Smoothing)
         self._target_dyn_history: List[Tuple[float, float, float]] = []
@@ -100,7 +127,7 @@ class ActivityManager:
             "target_object": "bottle",
             "sizing_target_object": "any",
             "follow_speed": 230,
-            "turn_speed": 228,
+            "turn_speed": 235,
             "obstacle_cruise_speed": 205,
             "obstacle_turn_speed": 225,
             "obstacle_threshold": 0.22,         # Collision score threshold (0.15 sensitive .. 0.35 relaxed)
@@ -122,6 +149,7 @@ class ActivityManager:
             "status": "IDLE",
             "motion_enabled": True,
             "target_found": False,
+            "target_locked": False,
             "target_is_moving": False,
             "movement_mode": "SMOOTH_FAST",
             "distance_cm": 0.0,
@@ -171,9 +199,19 @@ class ActivityManager:
             },
             "target_box": [],
             "leg_box": [],
+            "target_polygon": [],
+            "leg_polygon": [],
             "fps": 0.0,
             "vlm_plan": None,
+            "motion_plan": None,
         }
+
+        # Asynchronous perception pipeline for high-framerate real-time tracking
+        self._perception_thread: Optional[threading.Thread] = None
+        self._latest_detections: List[Any] = []
+        self._latest_detection_time: float = 0.0
+        self._vision_lock = threading.Lock()
+        self._active_plan: Optional[Dict[str, Any]] = None
 
     def set_dependencies(self, camera=None, comm=None, vision=None, vlm_planner=None, arm=None):
         """Update live peripheral adapters."""
@@ -188,6 +226,50 @@ class ActivityManager:
                 self.vlm_planner = vlm_planner
             if arm is not None:
                 self.arm = arm
+
+    def _get_turn_speed(self) -> int:
+        """Reads configured baseline turn speed floor from robot_config.yaml or self.config.
+        
+        The turn speed set in robot_config.yaml is the hard baseline floor constraint (never less, but can scale higher).
+        """
+        baseline = int(self.config.get("turn_speed", 0))
+        rc_path = os.path.join(BASE_DIR, "config/robot_config.yaml")
+        if os.path.exists(rc_path):
+            try:
+                import yaml
+                with open(rc_path, "r") as f:
+                    cfg = yaml.safe_load(f) or {}
+                mcfg = cfg.get("motors", {})
+                baseline = max(baseline, int(mcfg.get("turn_speed", 235)))
+            except Exception:
+                baseline = max(baseline, 235)
+        else:
+            baseline = max(baseline, 235)
+        return max(235, baseline)
+
+    def _get_sweet_spot(self, w: int = 640, h: int = 480) -> Tuple[int, int]:
+        """Returns calibrated (center_x, center_y) grasp sweet spot crosshair, scaled to frame resolution."""
+        sx = int(self.config.get("sweet_spot_x", 0))
+        sy = int(self.config.get("sweet_spot_y", 0))
+        if sx <= 0 or sy <= 0:
+            vc_path = os.path.join(BASE_DIR, "config/vision_config.yaml")
+            if os.path.exists(vc_path):
+                try:
+                    import yaml
+                    with open(vc_path, "r") as f:
+                        vcfg = yaml.safe_load(f) or {}
+                    gss = vcfg.get("grasp_sweet_spot", {})
+                    sx = int(gss.get("center_x", 324))
+                    sy = int(gss.get("center_y", 247))
+                except Exception:
+                    sx, sy = 324, 247
+            else:
+                sx, sy = 324, 247
+        if w != 640 and w > 0:
+            sx = int(round(sx * (w / 640.0)))
+        if h != 480 and h > 0:
+            sy = int(round(sy * (h / 480.0)))
+        return sx, sy
 
     def _get_arm_limits(self) -> Dict[str, int]:
         """Reads calibrated servo angle bounds and stow baselines from arm controller or config."""
@@ -237,10 +319,12 @@ class ActivityManager:
         }
 
     def _track_arm_elevation(self, cy: int, h: int, latency_s: float = 0.05) -> Tuple[int, int]:
-        """Inverse-kinematics-like arm elevation tracking to vertically center target in camera view.
+        """Decisive, non-oscillating inverse-kinematics arm elevation tracking to vertically center target in camera view.
 
-        Controls Shoulder (S1) and Elbow (S2) within robot config bounds,
-        synchronized with the measured latency of the camera, vision model, and VLM.
+        Features:
+        - Rigidly locks servos in place once within the sweet spot deadband (holding state) with hysteresis.
+        - Synchronizes with the calibrated grasp sweet spot (cy - sweet_spot_y).
+        - Executes decisive quantized steps (min. 3 degrees) instead of 1-degree micro-hunting.
         """
         now = time.time()
         limits = self._get_arm_limits()
@@ -248,37 +332,185 @@ class ActivityManager:
         s1_stow, s1_down = limits["s1_stow"], limits["s1_down"]
         s2_min, s2_max = limits["s2_min"], limits["s2_max"]
         s2_stow, s2_down = limits["s2_stow"], limits["s2_down"]
-        cur_s1 = limits["cur_s1"]
-        cur_s2 = limits["cur_s2"]
+        cur_s1 = self._arm_last_s1 or limits["cur_s1"]
+        cur_s2 = self._arm_last_s2 or limits["cur_s2"]
         cur_s3 = limits["cur_s3"]
 
-        # Vertical sweet spot (approx 52% of frame height)
-        sy = int(h * 0.52)
+        # Calibrated vertical sweet spot from vision config / scaling
+        _, sy = self._get_sweet_spot(640, h)
         ey = int(cy - sy)  # Positive: target is low (near floor). Negative: target is high.
 
-        # Deadband guard (+/- 18px): target is already centered vertically
-        deadband_y = 18
-        if abs(ey) <= deadband_y:
+        # Hysteresis Deadband Guard:
+        # If holding steady, require error > 32px before moving.
+        # If adjusting, stop and lock firmly when error <= 20px.
+        deadband_y = 20
+        breakout_y = 32
+        is_centered = abs(ey) <= breakout_y if self._arm_holding else abs(ey) <= deadband_y
+
+        if is_centered:
+            self._arm_holding = True
             self.telemetry["arm_ik"] = {
                 "s1": cur_s1,
                 "s2": cur_s2,
                 "error_y": ey,
                 "vertical_status": "CENTERED",
                 "active": True,
+                "status": "SETTLED",
                 "latency_ms": round(latency_s * 1000, 1),
             }
             return cur_s1, cur_s2
 
+        self._arm_holding = False
+
         # Latency synchronization guard:
-        # Prevent issuing new servo micro-steps faster than the camera + vision + VLM latency cycle,
-        # ensuring the camera observes the previous servo motion before issuing another step.
         min_interval = max(0.06, min(0.25, latency_s))
         if (now - self._arm_last_update_time) < min_interval:
             return cur_s1, cur_s2
 
-        # Inverse Kinematics Mapping:
-        # Object is lower in frame (ey > 0) -> Arm reaches DOWN towards floor (S1 increases towards s1_down, S2 decreases towards s2_down)
-        # Object is higher in frame (ey < 0) -> Arm pitches UP towards min/stow angle (S1 decreases, S2 at stow/max)
+        # Decisive Inverse Kinematics Mapping:
+        # Object is lower in frame (ey > 0) -> Arm reaches DOWN towards floor
+        # Object is higher in frame (ey < 0) -> Arm pitches UP towards stow pose
+        norm_ey = max(-1.0, min(1.0, float(ey) / float(h * 0.38)))
+        if norm_ey > 0:
+            target_s1 = s1_stow + norm_ey * (s1_down - s1_stow)
+            target_s2 = s2_stow - norm_ey * (s2_stow - s2_down)
+        else:
+            target_s1 = s1_stow - abs(norm_ey) * (s1_stow - s1_min)
+            target_s2 = s2_stow
+
+        # Quantize target into decisive 3-degree steps to eliminate single-degree hunting
+        raw_s1 = int(round(target_s1))
+        raw_s2 = int(round(target_s2))
+        target_s1 = max(s1_min, min(s1_max, int(round(raw_s1 / 3.0) * 3)))
+        target_s2 = max(s2_min, min(s2_max, int(round(raw_s2 / 3.0) * 3)))
+
+        # Only dispatch if angular difference is decisive (>= 3 degrees)
+        last_s1 = self._arm_last_s1 if self._arm_last_s1 is not None else cur_s1
+        last_s2 = self._arm_last_s2 if self._arm_last_s2 is not None else cur_s2
+
+        if (abs(target_s1 - last_s1) >= 3 or abs(target_s2 - last_s2) >= 3):
+            if self.arm:
+                try:
+                    self.arm.cur_s1 = target_s1
+                    self.arm.cur_s2 = target_s2
+                    if hasattr(self.arm, "comm") and self.arm.comm:
+                        self.arm.comm.send_servos(target_s1, target_s2, cur_s3)
+                except Exception as e:
+                    print(f"[Activities] Arm tracking move error: {e}")
+            elif self.comm:
+                try:
+                    self.comm.send_servos(target_s1, target_s2, cur_s3)
+                except Exception as e:
+                    print(f"[Activities] Comm send_servos error: {e}")
+
+            self._arm_last_s1 = target_s1
+            self._arm_last_s2 = target_s2
+            self._arm_last_update_time = now
+
+        status = "PITCH_DOWN" if ey > 0 else "PITCH_UP"
+        self.telemetry["arm_ik"] = {
+            "s1": target_s1,
+            "s2": target_s2,
+            "error_y": ey,
+            "vertical_status": status,
+            "active": True,
+            "status": "TRACKING",
+            "latency_ms": round(latency_s * 1000, 1),
+        }
+        return target_s1, target_s2
+
+    def _trigger_autonomous_grab(self, target_name: str) -> bool:
+        """Initiates autonomous grab sequence when target has settled in the sweet spot."""
+        if self._is_grabbing or not self.config.get("motion_enabled", True):
+            return False
+
+        self._is_grabbing = True
+        self.telemetry["status"] = "GRABBING"
+        self.telemetry["action"] = "INITIATE_GRAB"
+        self.telemetry["details"] = f"IK settled in sweet spot! Executing autonomous grab sequence for {target_name}."
+
+        if self.comm:
+            self.comm.send_stop()
+
+        def _grab_worker():
+            try:
+                print(f"[Activities] Autonomous grab initiated for '{target_name}'! Halting chassis and executing arm sequence...")
+                time.sleep(0.2)
+                if self.arm:
+                    self.arm.reload_config()
+                    self.arm.execute_pick_sequence(wait_completion=True, timeout_s=6.5)
+                    self.telemetry["status"] = "OBJECT_SECURED"
+                    self.telemetry["details"] = f"Object '{target_name}' successfully grasped and lifted to stow position!"
+                    print(f"[Activities] Autonomous pick complete for '{target_name}'.")
+                elif self.comm:
+                    # Direct hardware servo sequence fallback
+                    limits = self._get_arm_limits()
+                    s1_stow, s1_down = limits["s1_stow"], limits["s1_down"]
+                    s2_stow, s2_down = limits["s2_stow"], limits["s2_down"]
+                    s3_open, s3_close = limits["s3_open"], limits["s3_close"]
+
+                    # Step 1: Open gripper
+                    self.comm.send_servos(s1_stow, s2_stow, s3_open)
+                    time.sleep(0.4)
+                    # Step 2: Extend down
+                    self.comm.send_servos(s1_down, s2_down, s3_open)
+                    time.sleep(0.7)
+                    # Step 3: Clamp jaws
+                    self.comm.send_servos(s1_down, s2_down, s3_close)
+                    time.sleep(0.6)
+                    # Step 4: Stow arm
+                    self.comm.send_servos(s1_stow, s2_stow, s3_close)
+                    time.sleep(0.7)
+                    self.telemetry["status"] = "OBJECT_SECURED"
+                    self.telemetry["details"] = f"Object '{target_name}' secured in gripper!"
+            except Exception as e:
+                print(f"[Activities] Autonomous grab sequence error: {e}")
+                self.telemetry["details"] = f"Grab sequence error: {e}"
+            finally:
+                time.sleep(1.2)
+                self._is_grabbing = False
+                self._ik_settled_frames = 0
+
+        threading.Thread(target=_grab_worker, daemon=True).start()
+        return True
+
+    def _plan_linkage_trajectory(
+        self,
+        target_name: str,
+        cx: int,
+        cy: int,
+        w: int,
+        h: int,
+        dist_cm: float,
+        target_dist_cm: float,
+        is_moving: bool,
+        target_poly: Optional[List[Any]] = None
+    ) -> Dict[str, Any]:
+        """Maps out the complete multi-step motion and arm IK plan to reach the target point or linkage.
+        
+        Calculates:
+        1. Linkage Error Vector: dx (horizontal) and ey (vertical) from calibrated camera sweet spot crosshair (sx, sy).
+        2. Arm Elevation IK Pose: Exact joint angles (S1*, S2*) pointing directly at target centroid.
+        3. Multi-Step Trajectory Stages:
+           - Stage 1: Heading Alignment (Pivot or Arc Turn to center linkage vector)
+           - Stage 2: Approach Cruise (Continuous smooth forward drive to standoff)
+           - Stage 3: Standoff Hold (Stable position hold within safe clearance)
+        """
+        sx, sy = self._get_sweet_spot(w, h)
+        dx = cx - sx
+        ey = cy - sy
+        dist_err = dist_cm - target_dist_cm
+        deadband_x = int(self.config.get("deadband_x", 30))
+        f_speed = max(210, int(self.config.get("follow_speed", 230)))
+        t_speed = self._get_turn_speed()
+
+        # 1. Arm IK Target Pose Calculation
+        limits = self._get_arm_limits()
+        s1_stow, s1_down = limits["s1_stow"], limits["s1_down"]
+        s2_stow, s2_down = limits["s2_stow"], limits["s2_down"]
+        s1_min, s1_max = limits["s1_min"], limits["s1_max"]
+        s2_min, s2_max = limits["s2_min"], limits["s2_max"]
+
         norm_ey = max(-1.0, min(1.0, float(ey) / float(h * 0.40)))
         if norm_ey > 0:
             target_s1 = s1_stow + norm_ey * (s1_down - s1_stow)
@@ -290,45 +522,99 @@ class ActivityManager:
         target_s1 = max(s1_min, min(s1_max, int(round(target_s1))))
         target_s2 = max(s2_min, min(s2_max, int(round(target_s2))))
 
-        # Slew rate micro-stepping synced to latency:
-        # Hardware stepper rate is 1 deg per 20ms (egrabbot.ino).
-        # In latency window latency_s, max physical travel is ~latency_s / 0.022.
-        max_phys_step = max(1, min(4, int(latency_s / 0.022)))
-        step_deg = max(1, min(max_phys_step, int(abs(ey) / 35.0) + 1))
+        # 2. Multi-Step Trajectory Stages Mapping
+        stages = []
+        turn_dir = "RIGHT" if dx > 0 else "LEFT"
 
-        # Incremental step towards target
-        delta_s1 = max(-step_deg, min(step_deg, target_s1 - cur_s1))
-        delta_s2 = max(-step_deg, min(step_deg, target_s2 - cur_s2))
+        err_mag = abs(dx)
+        err_ratio = min(1.0, max(0.0, (err_mag - deadband_x) / float(max(1, w // 3))))
+        turn_pwm = max(t_speed, int(t_speed + err_ratio * (255 - t_speed)))
 
-        next_s1 = max(s1_min, min(s1_max, cur_s1 + delta_s1))
-        next_s2 = max(s2_min, min(s2_max, cur_s2 + delta_s2))
+        # Heading Turn Stage
+        if err_mag > deadband_x:
+            est_turn_dur = max(0.10, min(0.35, 0.08 + (err_mag / float(w // 2)) * 0.20))
+            if dist_err > 12.0:
+                # Continuous Arc Steering Stage
+                steer_bias = int(min(25, (err_mag / float(w // 2)) * 25))
+                if dx > 0:
+                    l_arc, r_arc = min(255, max(t_speed, f_speed + steer_bias)), max(180, f_speed - steer_bias * 2)
+                else:
+                    l_arc, r_arc = max(180, f_speed - steer_bias * 2), min(255, max(t_speed, f_speed + steer_bias))
+                stages.append({
+                    "stage": 1,
+                    "name": f"ARC_ALIGN_{turn_dir}",
+                    "action": f"TURN_{turn_dir}",
+                    "left_pwm": l_arc,
+                    "right_pwm": r_arc,
+                    "duration_s": est_turn_dur,
+                    "continuous": True,
+                    "desc": f"Continuous arc steering {turn_dir.lower()} along linkage vector (dx={dx:+d}px)."
+                })
+            else:
+                lpwm = turn_pwm if dx > 0 else -turn_pwm
+                rpwm = -turn_pwm if dx > 0 else turn_pwm
+                stages.append({
+                    "stage": 1,
+                    "name": f"PIVOT_ALIGN_{turn_dir}",
+                    "action": f"TURN_{turn_dir}",
+                    "left_pwm": lpwm,
+                    "right_pwm": rpwm,
+                    "duration_s": est_turn_dur,
+                    "continuous": False,
+                    "desc": f"Pivot alignment {turn_dir.lower()} to center linkage vector (dx={dx:+d}px)."
+                })
 
-        if next_s1 != cur_s1 or next_s2 != cur_s2:
-            if self.arm:
-                try:
-                    self.arm.move_arm_alternate(next_s1, next_s2, s3=cur_s3, wait_for_s1=False, clamp_to_bounds=True)
-                except Exception as e:
-                    print(f"[Activities] Arm tracking move error: {e}")
-            elif self.comm:
-                try:
-                    self.comm.send_servos(next_s1, next_s2, cur_s3)
-                except Exception as e:
-                    print(f"[Activities] Comm send_servos error: {e}")
+        # Approach or Standoff Stage
+        if dist_err > 8.0:
+            est_drive_dur = max(0.15, min(1.2, (dist_err / 80.0) * 0.6))
+            stages.append({
+                "stage": len(stages) + 1,
+                "name": "APPROACH_CRUISE",
+                "action": "APPROACH",
+                "left_pwm": f_speed,
+                "right_pwm": f_speed,
+                "duration_s": est_drive_dur,
+                "continuous": True,
+                "desc": f"Continuous cruise along planned linkage to target standoff {target_dist_cm:.0f}cm."
+            })
+        elif dist_err < -6.0:
+            stages.append({
+                "stage": len(stages) + 1,
+                "name": "REVERSE_CLEAR",
+                "action": "BACK_UP",
+                "left_pwm": -f_speed,
+                "right_pwm": -f_speed,
+                "duration_s": 0.15,
+                "continuous": False,
+                "desc": f"Clearance reverse: Target {dist_cm:.0f}cm closer than standoff {target_dist_cm:.0f}cm."
+            })
+        else:
+            stages.append({
+                "stage": len(stages) + 1,
+                "name": "STANDOFF_HOLD",
+                "action": "ALIGNED_HOLD",
+                "left_pwm": 0,
+                "right_pwm": 0,
+                "duration_s": 0.15,
+                "continuous": False,
+                "desc": f"Aligned at standoff {dist_cm:.0f}cm. Holding position."
+            })
 
-            self._arm_last_s1 = next_s1
-            self._arm_last_s2 = next_s2
-            self._arm_last_update_time = now
-
-        status = "PITCH_DOWN" if ey > 0 else "PITCH_UP"
-        self.telemetry["arm_ik"] = {
-            "s1": next_s1,
-            "s2": next_s2,
-            "error_y": ey,
-            "vertical_status": status,
-            "active": True,
-            "latency_ms": round(latency_s * 1000, 1),
+        active_stage = stages[0]
+        return {
+            "target": target_name,
+            "target_point": [int(cx), int(cy)],
+            "sweet_spot_point": [int(sx), int(sy)],
+            "dist_cm": round(dist_cm, 1),
+            "target_dist_cm": round(target_dist_cm, 1),
+            "dx_px": int(dx),
+            "ey_px": int(ey),
+            "arm_target": {"s1": target_s1, "s2": target_s2},
+            "active_stage": active_stage,
+            "stages": stages,
+            "is_moving": is_moving,
+            "total_duration_s": round(sum(s["duration_s"] for s in stages), 2)
         }
-        return next_s1, next_s2
 
     def toggle_motion(self, enabled: Optional[bool] = None) -> bool:
         """Toggles or sets the chassis motion mode (Autonomous Move vs Just Detect)."""
@@ -433,7 +719,7 @@ class ActivityManager:
                 return
 
             # Convert any forward/reverse-biased arc turn to pure stationary pivot turn in place
-            turn_speed = max(228, int(self.config.get("turn_speed", 228)))
+            turn_speed = self._get_turn_speed()
             if lpwm > rpwm:
                 pivot_l, pivot_r = turn_speed, -turn_speed
             else:
@@ -522,6 +808,12 @@ class ActivityManager:
             self._sizing_ema_w = None
             self._sizing_ema_h = None
 
+            # Reset target spatial locking & persistence filter
+            self._locked_target_center = None
+            self._locked_target_label = None
+            self._locked_target_lost_frames = 0
+            self._locked_target_frames = 0
+
             if params:
                 for k, v in params.items():
                     if k in self.config:
@@ -538,6 +830,14 @@ class ActivityManager:
                         # Map sensitivity slider (0.1..0.5) to threshold
                         self.config["obstacle_threshold"] = float(v)
 
+            # Ensure normalized target_color and target_object
+            if "target_color" in self.config:
+                c_norm = str(self.config["target_color"]).strip().capitalize()
+                self.config["target_color"] = c_norm
+                self.telemetry["target_color"] = c_norm
+            if "target_object" in self.config:
+                self.telemetry["target_object"] = str(self.config["target_object"]).strip().lower()
+
             self.active_activity = clean_name
             self.running = True
             self.telemetry["activity"] = clean_name
@@ -545,10 +845,44 @@ class ActivityManager:
             self.telemetry["status"] = "STARTING"
             self.telemetry["details"] = f"Initializing {clean_name.replace('_', ' ').title()}..."
 
+            # Launch asynchronous perception worker for high-throughput tracking
+            if clean_name in ("person_follower", "object_tracking", "color_track_and_classify") and self.camera and self.vision:
+                self._perception_thread = threading.Thread(target=self._perception_worker, daemon=True)
+                self._perception_thread.start()
+
             self.worker_thread = threading.Thread(target=self._activity_loop, daemon=True)
             self.worker_thread.start()
             print(f"[Activities] Started activity: {clean_name} (params={params})")
             return True
+
+    def _perception_worker(self):
+        """Asynchronous vision perception worker that runs detection in background to sustain high framerate."""
+        while self.running:
+            act = self.active_activity
+            if act not in ("person_follower", "object_tracking", "color_track_and_classify"):
+                time.sleep(0.04)
+                continue
+
+            frame = None
+            if self.camera and self.camera.is_opened():
+                try:
+                    frame = self.camera.get_frame()
+                except Exception:
+                    frame = None
+
+            if frame is None or not self.vision:
+                time.sleep(0.03)
+                continue
+
+            try:
+                dets = self.vision.detect_all(frame)
+                with self._vision_lock:
+                    self._latest_detections = dets
+                    self._latest_detection_time = time.time()
+            except Exception as e:
+                pass
+
+            time.sleep(0.01)
 
     def stop_activity(self) -> bool:
         """Stops the active activity and halts robot motion safely."""
@@ -567,18 +901,31 @@ class ActivityManager:
         self._ct_ema_x = None
         self._ct_ema_y = None
         self._ot_ema_x = None
+        self._locked_target_center = None
+        self._locked_target_label = None
+        self._locked_target_lost_frames = 0
+        self._locked_target_frames = 0
         self._target_dyn_history.clear()
         self._target_is_moving = False
         self._last_cmd_l = 0
         self._last_cmd_r = 0
+        self._perception_thread = None
+        with self._vision_lock:
+            self._latest_detections = []
+            self._latest_detection_time = 0.0
+        self._active_plan = None
         self.telemetry["activity"] = "none"
         self.telemetry["running"] = False
         self.telemetry["status"] = "IDLE"
         self.telemetry["target_found"] = False
+        self.telemetry["target_locked"] = False
         self.telemetry["target_is_moving"] = False
         self.telemetry["movement_mode"] = "SMOOTH_FAST"
         self.telemetry["target_box"] = []
         self.telemetry["leg_box"] = []
+        self.telemetry["target_polygon"] = []
+        self.telemetry["leg_polygon"] = []
+        self.telemetry["motion_plan"] = None
         self.telemetry["target_type"] = "none"
         self.telemetry["ground_y"] = 0.0
         self.telemetry["action"] = "STOPPED"
@@ -625,10 +972,10 @@ class ActivityManager:
         return int(max(-255, min(255, lpwm - trim))), int(max(-255, min(255, rpwm + trim)))
 
     def _compute_diminishing_turn_pwm(self, ex: int, w: int) -> int:
-        """Computes diminishing turn PWM scaling down to baseline stiction floor as error decreases."""
+        """Computes diminishing turn PWM scaling down to baseline turn speed floor as error decreases."""
         deadband_x = int(self.config.get("deadband_x", 25))
-        min_overcome = max(228, int(self.config.get("turn_speed", 228)))
-        max_turn = 248
+        min_overcome = self._get_turn_speed()
+        max_turn = max(min_overcome, 248)
         err_mag = abs(ex)
         if err_mag <= deadband_x:
             return 0
@@ -708,34 +1055,42 @@ class ActivityManager:
         body_candidates = []
         upper_candidates = []
 
-        if self.vision:
+        detections = []
+        with self._vision_lock:
+            if self._latest_detections and (now - self._latest_detection_time) < 1.2:
+                detections = list(self._latest_detections)
+        # Direct synchronous detection if perception thread not running (e.g. tests or startup)
+        if not detections and self.vision:
             try:
                 detections = self.vision.detect_all(frame)
-                for d in detections:
-                    cat = d.category.lower().strip()
-                    bb = d.bounding_box
-                    if not bb or len(bb) != 4:
-                        continue
-                    ymin, xmin, ymax, xmax = [int(v) for v in bb]
-                    if xmax <= xmin or ymax <= ymin:
-                        continue
-
-                    # 1. Direct Leg / Lower-body detection (Priority 1)
-                    if any(c in cat for c in LEG_CLASSES) and d.confidence >= 0.18:
-                        leg_candidates.append((ymin, xmin, ymax, xmax, d.confidence, cat))
-                    # 2. Whole body / person detection (Priority 2)
-                    elif any(c == cat or c in cat for c in BODY_CLASSES) and d.confidence >= 0.20:
-                        body_candidates.append((ymin, xmin, ymax, xmax, d.confidence, cat))
-                    # 3. Upper body detection (Priority 3 fallback)
-                    elif any(c in cat for c in UPPER_BODY_CLASSES) and d.confidence >= 0.22:
-                        upper_candidates.append((ymin, xmin, ymax, xmax, d.confidence, cat))
             except Exception as e:
                 print(f"[Activities] Vision inference exception: {e}")
+
+        for d in detections:
+            cat = d.category.lower().strip()
+            bb = d.bounding_box
+            if not bb or len(bb) != 4:
+                continue
+            ymin, xmin, ymax, xmax = [int(v) for v in bb]
+            if xmax <= xmin or ymax <= ymin:
+                continue
+            poly = getattr(d, "mask_polygon", None)
+
+            # 1. Direct Leg / Lower-body detection (Priority 1)
+            if any(c in cat for c in LEG_CLASSES) and d.confidence >= 0.18:
+                leg_candidates.append((ymin, xmin, ymax, xmax, d.confidence, cat, poly))
+            # 2. Whole body / person detection (Priority 2)
+            elif any(c == cat or c in cat for c in BODY_CLASSES) and d.confidence >= 0.20:
+                body_candidates.append((ymin, xmin, ymax, xmax, d.confidence, cat, poly))
+            # 3. Upper body detection (Priority 3 fallback)
+            elif any(c in cat for c in UPPER_BODY_CLASSES) and d.confidence >= 0.22:
+                upper_candidates.append((ymin, xmin, ymax, xmax, d.confidence, cat, poly))
 
         # Target selection with LEGS AS TOP PRIORITY
         target_box = None
         leg_box = None
         target_type = "NONE"
+        chosen_poly = None
         px_center = cx_img
         px_ground_y = int(h * 0.83)
         height_ratio = 0.0
@@ -773,6 +1128,7 @@ class ActivityManager:
             target_box = (by0, bx0, by1, bx1)
             leg_box = fused_leg
             target_type = "PERSON_WITH_LEGS"
+            chosen_poly = primary_body[6] or (leg_candidates[0][6] if leg_candidates else None)
             px_center = (fused_leg[1] + fused_leg[3]) // 2
             px_ground_y = fused_leg[2]
             height_ratio = (by1 - by0) / float(h)
@@ -783,6 +1139,7 @@ class ActivityManager:
             target_box = fused_leg
             leg_box = fused_leg
             target_type = "BIPEDAL_LEGS" if len(leg_candidates) > 1 else "LEGS"
+            chosen_poly = leg_candidates[0][6]
             px_center = (fused_leg[1] + fused_leg[3]) // 2
             px_ground_y = fused_leg[2]
             height_ratio = (fused_leg[2] - fused_leg[0]) / float(h)
@@ -799,6 +1156,7 @@ class ActivityManager:
             by0, bx0, by1, bx1 = b[:4]
             target_box = (by0, bx0, by1, bx1)
             target_type = "WHOLE_BODY"
+            chosen_poly = b[6]
             px_center = (bx0 + bx1) // 2
             px_ground_y = by1
             height_ratio = (by1 - by0) / float(h)
@@ -814,6 +1172,7 @@ class ActivityManager:
             target_box = (uy0, ux0, uy1, ux1)
             leg_box = []
             target_type = "UPPER_BODY"
+            chosen_poly = u[6]
             px_center = (ux0 + ux1) // 2
             px_ground_y = uy1
             height_ratio = (uy1 - uy0) / float(h)
@@ -823,6 +1182,15 @@ class ActivityManager:
             last_seen = now
             ymin, xmin, ymax, xmax = target_box
             self._pf_last_target_center = (px_center, (ymin + ymax) // 2)
+
+            # Store segmentation polygon contour in telemetry for live HUD/stream display
+            if chosen_poly and len(chosen_poly) >= 3:
+                self.telemetry["target_polygon"] = [[int(pt[0]), int(pt[1])] for pt in chosen_poly]
+            else:
+                self.telemetry["target_polygon"] = [
+                    [int(xmin), int(ymin)], [int(xmax), int(ymin)],
+                    [int(xmax), int(ymax)], [int(xmin), int(ymax)]
+                ]
 
             # Temporal EMA Smoothing for horizontal center and ground depth
             if self._pf_ema_x is None:
@@ -835,7 +1203,9 @@ class ActivityManager:
             smooth_cx = int(self._pf_ema_x)
             smooth_gy = int(self._pf_ema_ymax)
 
-            ex = smooth_cx - cx_img
+            sx, sy = self._get_sweet_spot(w, h)
+            ex = smooth_cx - sx
+            ey = smooth_gy - sy
             ground_ratio = smooth_gy / float(h)
 
             # Calibrated Physical Distance in Centimeters
@@ -854,6 +1224,7 @@ class ActivityManager:
 
             deadband_x = int(self.config.get("deadband_x", 30))
             f_speed = max(230, int(self.config.get("follow_speed", 230)))
+            t_speed = self._get_turn_speed()
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             pulse_dur = 0.12
 
@@ -861,30 +1232,63 @@ class ActivityManager:
             target_cy = (ymin + ymax) // 2
             is_moving = self._evaluate_target_dynamics(px_center, target_cy, now)
 
-            # 1. PLAN MOTION WITH VLM FIRST (Computes continuous path and anti-overextension guidance)
-            continuous_drive = False
+            # 1. MAP OUT ALL MOVEMENT & KINEMATICS FIRST
+            motion_plan = self._plan_linkage_trajectory(
+                target_name=target_type,
+                cx=smooth_cx,
+                cy=target_cy,
+                w=w,
+                h=h,
+                dist_cm=dist_cm,
+                target_dist_cm=target_dist,
+                is_moving=is_moving,
+                target_poly=self.telemetry.get("target_polygon")
+            )
+            self.telemetry["motion_plan"] = motion_plan
+            active_stage = motion_plan["active_stage"]
+            left_pwm = active_stage["left_pwm"]
+            right_pwm = active_stage["right_pwm"]
+            action = active_stage["action"]
+            continuous_drive = active_stage.get("continuous", False)
+            pulse_dur = active_stage.get("duration_s", 0.12)
+
+            # Optional VLM planner integration (deterministic, fast with use_vlm_llm=False)
             if self.vlm_planner:
-                sweet_spot = {"center_x": cx_img, "center_y": int(h * 0.52), "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
+                sweet_spot = {"center_x": sx, "center_y": sy, "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
                 mock_det = DetectionResult(
                     detected=True,
                     category=target_type.lower(),
                     confidence=0.90,
                     bounding_box=(ymin, xmin, ymax, xmax),
-                    material_color="Dynamic"
+                    material_color="Dynamic",
+                    mask_polygon=self.telemetry.get("target_polygon")
                 )
                 vlm_plan = self.vlm_planner.plan_movement(
                     mock_det,
                     sweet_spot,
+                    use_vlm_llm=False,
                     dist_cm=dist_cm,
                     target_dist_cm=float(target_dist),
                     target_is_moving=is_moving
                 )
                 self.telemetry["vlm_plan"] = vlm_plan.to_dict()
-                left_pwm = vlm_plan.left_pwm
-                right_pwm = vlm_plan.right_pwm
-                action = vlm_plan.action
-                continuous_drive = vlm_plan.continuous_drive
-                pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+                if vlm_plan.continuous_drive:
+                    left_pwm = vlm_plan.left_pwm
+                    right_pwm = vlm_plan.right_pwm
+                    action = vlm_plan.action
+                    continuous_drive = True
+                    pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+
+                # Hard turn speed floor guarantee
+                if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
+                    if left_pwm > 0 and left_pwm < t_speed:
+                        left_pwm = t_speed
+                    elif left_pwm < 0 and left_pwm > -t_speed:
+                        left_pwm = -t_speed
+                    if right_pwm > 0 and right_pwm < t_speed:
+                        right_pwm = t_speed
+                    elif right_pwm < 0 and right_pwm > -t_speed:
+                        right_pwm = -t_speed
 
                 if (left_pwm != 0 or right_pwm != 0):
                     self.vlm_planner.record_feedback(
@@ -904,7 +1308,7 @@ class ActivityManager:
                         action = "TURN_RIGHT"
                         if dist_action == "APPROACH":
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
-                            left_pwm = min(255, f_speed + steer_bias)
+                            left_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             right_pwm = max(180, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
@@ -913,7 +1317,7 @@ class ActivityManager:
                         action = "TURN_LEFT"
                         if dist_action == "APPROACH":
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
-                            right_pwm = min(255, f_speed + steer_bias)
+                            right_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             left_pwm = max(180, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
@@ -931,7 +1335,7 @@ class ActivityManager:
                     action = "ALIGNED_HOLD"
                     left_pwm, right_pwm = 0, 0
 
-            # Arm elevation tracking (IK-like pitch up/down within servo bounds synced to latency)
+            # Arm elevation tracking (smooth hardware interpolation)
             dt_lat = max(0.04, time.time() - now)
             self._track_arm_elevation(target_cy, h, latency_s=dt_lat)
 
@@ -961,6 +1365,9 @@ class ActivityManager:
             self.telemetry["target_found"] = False
             self.telemetry["target_box"] = []
             self.telemetry["leg_box"] = []
+            self.telemetry["target_polygon"] = []
+            self.telemetry["leg_polygon"] = []
+            self.telemetry["motion_plan"] = None
             self.telemetry["target_type"] = "NONE"
             self._target_dyn_history.clear()
             self._target_is_moving = False
@@ -979,8 +1386,9 @@ class ActivityManager:
 
     def _step_color_tracking(self, frame: np.ndarray, w: int, h: int, cx_img: int, last_seen: float) -> float:
         """Processes frame for high-speed HSV color blob segmentation and tracking."""
-        target_color = self.config.get("target_color", "Red")
-        ranges = HSV_COLOR_RANGES.get(target_color, HSV_COLOR_RANGES["Red"])
+        target_color = str(self.config.get("target_color", "Red")).strip().capitalize()
+        self.telemetry["target_color"] = target_color
+        ranges = get_hsv_ranges(target_color)
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = None
@@ -994,15 +1402,54 @@ class ActivityManager:
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        best_cnt = None
-        max_area = 0
-        min_detect_area = 200  # Lowered from 450 to detect smaller/distant colored targets
-
+        candidate_blobs = []
+        min_detect_area = 200  # Lowered to detect smaller/distant colored targets
         for cnt in contours:
             a = cv2.contourArea(cnt)
-            if a > max_area and a >= min_detect_area:
-                max_area = a
-                best_cnt = cnt
+            if a >= min_detect_area:
+                m = cv2.moments(cnt)
+                if m["m00"] > 0:
+                    cand_cx = int(m["m10"] / m["m00"])
+                    cand_cy = int(m["m01"] / m["m00"])
+                else:
+                    bx, by, bbw, bbh = cv2.boundingRect(cnt)
+                    cand_cx, cand_cy = bx + bbw // 2, by + bbh // 2
+                candidate_blobs.append((a, cnt, cand_cx, cand_cy))
+
+        best_cnt = None
+        max_area = 0
+        if candidate_blobs:
+            # Spatial Lock-In: Lock onto first seen target and keep focus on it!
+            if self._locked_target_center is not None and self._locked_target_lost_frames < 25:
+                lx, ly = self._locked_target_center
+                gate_radius = max(240.0, float(w) * 0.55)
+                candidate_blobs.sort(key=lambda b: math.hypot(b[2] - lx, b[3] - ly))
+                closest = candidate_blobs[0]
+                dist_to_lock = math.hypot(closest[2] - lx, closest[3] - ly)
+                if dist_to_lock <= gate_radius or len(candidate_blobs) == 1:
+                    max_area = closest[0]
+                    best_cnt = closest[1]
+                    self._locked_target_center = (closest[2], closest[3])
+                    self._locked_target_lost_frames = 0
+                    self._locked_target_frames += 1
+                else:
+                    self._locked_target_lost_frames += 1
+            else:
+                # Lock onto the first detected target (largest area)
+                candidate_blobs.sort(key=lambda b: b[0], reverse=True)
+                chosen = candidate_blobs[0]
+                max_area = chosen[0]
+                best_cnt = chosen[1]
+                self._locked_target_center = (chosen[2], chosen[3])
+                self._locked_target_label = target_color
+                self._locked_target_lost_frames = 0
+                self._locked_target_frames = 1
+        elif self._locked_target_center is not None:
+            self._locked_target_lost_frames += 1
+            if self._locked_target_lost_frames > 25:
+                self._locked_target_center = None
+                self._locked_target_label = None
+                self._locked_target_frames = 0
 
         now = time.time()
         if best_cnt is not None:
@@ -1015,6 +1462,10 @@ class ActivityManager:
             else:
                 raw_cx, raw_cy = x + bw // 2, y + bh // 2
 
+            # Store segmentation polygon contour in telemetry for live HUD/stream display
+            approx = cv2.approxPolyDP(best_cnt, epsilon=2.0, closed=True)
+            self.telemetry["target_polygon"] = [[int(p[0][0]), int(p[0][1])] for p in approx]
+
             # Temporal EMA smoothing to eliminate single-pixel noise wobble
             if self._ct_ema_x is None:
                 self._ct_ema_x = float(raw_cx)
@@ -1026,9 +1477,12 @@ class ActivityManager:
             cx = int(self._ct_ema_x)
             cy = int(self._ct_ema_y)
 
+            sx, sy = self._get_sweet_spot(w, h)
+            ex = cx - sx
+            ey = cy - sy
+
             total_area = float(w * h)
             area_ratio = max_area / total_area
-            ex = cx - cx_img
 
             # Calibrated Physical Distance in Centimeters
             dist_cm = self.estimate_ground_distance(y + bh, h)
@@ -1038,10 +1492,13 @@ class ActivityManager:
             deadband_x = int(self.config.get("deadband_x", 25))
 
             self.telemetry["target_found"] = True
+            self.telemetry["target_locked"] = (self._locked_target_center is not None)
             self.telemetry["target_box"] = [int(y), int(x), int(y + bh), int(x + bw)]
             self.telemetry["error_x"] = int(ex)
+            self.telemetry["error_y"] = int(ey)
             self.telemetry["target_size"] = round(dist_cm, 1)
 
+            t_speed = self._get_turn_speed()
             f_speed = max(230, int(self.config.get("follow_speed", 230)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             target_dist = float(self.config.get("color_target_distance_cm", 25.0))
@@ -1049,31 +1506,62 @@ class ActivityManager:
             # Evaluate target dynamics (Moving vs Stationary Target)
             is_moving = self._evaluate_target_dynamics(cx, cy, now)
 
-            # 1. PLAN MOTION WITH VLM FIRST (Computes continuous path and anti-overextension guidance)
-            continuous_drive = False
-            pulse_dur = 0.12
+            # 1. MAP OUT ALL MOVEMENT & KINEMATICS FIRST
+            motion_plan = self._plan_linkage_trajectory(
+                target_name=target_color,
+                cx=cx,
+                cy=cy,
+                w=w,
+                h=h,
+                dist_cm=dist_cm,
+                target_dist_cm=target_dist,
+                is_moving=is_moving,
+                target_poly=self.telemetry.get("target_polygon")
+            )
+            self.telemetry["motion_plan"] = motion_plan
+            active_stage = motion_plan["active_stage"]
+            left_pwm = active_stage["left_pwm"]
+            right_pwm = active_stage["right_pwm"]
+            action = active_stage["action"]
+            continuous_drive = active_stage.get("continuous", False)
+            pulse_dur = active_stage.get("duration_s", 0.12)
+
             if self.vlm_planner:
-                sweet_spot = {"center_x": cx_img, "center_y": int(h * 0.52), "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
+                sweet_spot = {"center_x": sx, "center_y": sy, "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
                 mock_det = DetectionResult(
                     detected=True,
                     category=f"{target_color}_object",
                     confidence=0.92,
                     bounding_box=(y, x, y + bh, x + bw),
-                    material_color=target_color
+                    material_color=target_color,
+                    mask_polygon=self.telemetry.get("target_polygon")
                 )
                 vlm_plan = self.vlm_planner.plan_movement(
                     mock_det,
                     sweet_spot,
+                    use_vlm_llm=False,
                     dist_cm=dist_cm,
                     target_dist_cm=float(target_dist),
                     target_is_moving=is_moving
                 )
                 self.telemetry["vlm_plan"] = vlm_plan.to_dict()
-                left_pwm = vlm_plan.left_pwm
-                right_pwm = vlm_plan.right_pwm
-                action = vlm_plan.action
-                continuous_drive = vlm_plan.continuous_drive
-                pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+                if vlm_plan.continuous_drive:
+                    left_pwm = vlm_plan.left_pwm
+                    right_pwm = vlm_plan.right_pwm
+                    action = vlm_plan.action
+                    continuous_drive = True
+                    pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+
+                # Hard turn speed floor guarantee
+                if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
+                    if left_pwm > 0 and left_pwm < t_speed:
+                        left_pwm = t_speed
+                    elif left_pwm < 0 and left_pwm > -t_speed:
+                        left_pwm = -t_speed
+                    if right_pwm > 0 and right_pwm < t_speed:
+                        right_pwm = t_speed
+                    elif right_pwm < 0 and right_pwm > -t_speed:
+                        right_pwm = -t_speed
 
                 if (left_pwm != 0 or right_pwm != 0):
                     self.vlm_planner.record_feedback(
@@ -1093,7 +1581,7 @@ class ActivityManager:
                         action = "TURN_RIGHT"
                         if area_ratio < target_area_ratio:
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
-                            left_pwm = min(255, f_speed + steer_bias)
+                            left_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             right_pwm = max(180, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
@@ -1102,7 +1590,7 @@ class ActivityManager:
                         action = "TURN_LEFT"
                         if area_ratio < target_area_ratio:
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
-                            right_pwm = min(255, f_speed + steer_bias)
+                            right_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             left_pwm = max(180, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
@@ -1116,9 +1604,25 @@ class ActivityManager:
                     action = "ALIGNED_AT_TARGET"
                     left_pwm, right_pwm = 0, 0
 
-            # Arm elevation tracking (IK-like pitch up/down within servo bounds synced to latency)
+            # Arm elevation tracking (smooth hardware interpolation)
             dt_lat = max(0.04, time.time() - now)
             self._track_arm_elevation(cy, h, latency_s=dt_lat)
+
+            # Settle & Autonomous Grab Trigger:
+            # If target is centered horizontally and vertically, within grasp range, and steady:
+            is_x_centered = abs(ex) <= deadband_x
+            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
+            is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
+
+            if is_x_centered and is_y_centered and is_near and not is_moving:
+                self._ik_settled_frames += 1
+                if self._ik_settled_frames >= 10 and not self._is_grabbing:
+                    self._trigger_autonomous_grab(target_color)
+            else:
+                self._ik_settled_frames = max(0, self._ik_settled_frames - 1)
+
+            if self._is_grabbing:
+                return last_seen
 
             is_motion = self.config.get("motion_enabled", True)
             if not is_motion:
@@ -1137,12 +1641,19 @@ class ActivityManager:
         else:
             self.telemetry["target_found"] = False
             self.telemetry["target_box"] = []
+            self.telemetry["target_polygon"] = []
+            self.telemetry["motion_plan"] = None
             self._target_dyn_history.clear()
             self._target_is_moving = False
             lost_duration = now - last_seen
             if lost_duration > 1.2:
                 self._ct_ema_x = None
                 self._ct_ema_y = None
+                self._locked_target_center = None
+                self._locked_target_label = None
+                self._locked_target_lost_frames = 0
+                self._locked_target_frames = 0
+                self.telemetry["target_locked"] = False
                 self.telemetry["status"] = "SEARCHING"
                 self.telemetry["action"] = "STOPPED"
                 self.telemetry["details"] = f"Searching for {target_color} target in view..."
@@ -1168,22 +1679,72 @@ class ActivityManager:
         }
         search_terms = SYNONYM_MAP.get(target_obj, [target_obj])
 
-        if self.vision:
+        detections = []
+        with self._vision_lock:
+            if self._latest_detections and (now - self._latest_detection_time) < 1.2:
+                detections = list(self._latest_detections)
+        if not detections and self.vision:
             try:
                 detections = self.vision.detect_all(frame)
-                for d in detections:
-                    cat = d.category.lower().strip()
-                    is_match = (target_obj in ("any", "all", "*", "auto", "")) or any(st in cat or cat in st for st in search_terms)
-                    if is_match and d.confidence >= 0.18:
-                        bb = d.bounding_box
-                        if bb and len(bb) == 4:
-                            area = (bb[2] - bb[0]) * (bb[3] - bb[1])
-                            score = area + (d.confidence * 1000.0)
-                            if score > best_conf:
-                                best_conf = score
-                                best_box = (bb[0], bb[1], bb[2], bb[3], d.confidence, d.category)
             except Exception as e:
                 print(f"[Activities] Vision detection error in object tracking: {e}")
+
+        matching_candidates = []
+        for d in detections:
+            cat = d.category.lower().strip()
+            is_match = (target_obj in ("any", "all", "*", "auto", "")) or any(st in cat or cat in st for st in search_terms)
+            if is_match and d.confidence >= 0.18:
+                bb = d.bounding_box
+                if bb and len(bb) == 4:
+                    area = (bb[2] - bb[0]) * (bb[3] - bb[1])
+                    score = area + (d.confidence * 1000.0)
+                    cand_cx = (bb[1] + bb[3]) // 2
+                    cand_cy = (bb[0] + bb[2]) // 2
+                    poly = getattr(d, "mask_polygon", None)
+                    matching_candidates.append({
+                        "box": (bb[0], bb[1], bb[2], bb[3], d.confidence, d.category),
+                        "poly": poly,
+                        "cx": cand_cx,
+                        "cy": cand_cy,
+                        "area": area,
+                        "score": score,
+                        "cat": d.category
+                    })
+
+        best_box = None
+        best_poly = None
+        if matching_candidates:
+            # Spatial Lock-In: Lock onto first seen target and keep focus on it!
+            if self._locked_target_center is not None and self._locked_target_lost_frames < 25:
+                lx, ly = self._locked_target_center
+                gate_radius = max(240.0, float(w) * 0.55)
+                matching_candidates.sort(key=lambda c: math.hypot(c["cx"] - lx, c["cy"] - ly))
+                closest = matching_candidates[0]
+                dist_to_lock = math.hypot(closest["cx"] - lx, closest["cy"] - ly)
+                if dist_to_lock <= gate_radius or len(matching_candidates) == 1:
+                    best_box = closest["box"]
+                    best_poly = closest["poly"]
+                    self._locked_target_center = (closest["cx"], closest["cy"])
+                    self._locked_target_lost_frames = 0
+                    self._locked_target_frames += 1
+                else:
+                    self._locked_target_lost_frames += 1
+            else:
+                # Lock onto the first detected target (highest score)
+                matching_candidates.sort(key=lambda c: c["score"], reverse=True)
+                chosen = matching_candidates[0]
+                best_box = chosen["box"]
+                best_poly = chosen["poly"]
+                self._locked_target_center = (chosen["cx"], chosen["cy"])
+                self._locked_target_label = chosen["cat"]
+                self._locked_target_lost_frames = 0
+                self._locked_target_frames = 1
+        elif self._locked_target_center is not None:
+            self._locked_target_lost_frames += 1
+            if self._locked_target_lost_frames > 25:
+                self._locked_target_center = None
+                self._locked_target_label = None
+                self._locked_target_frames = 0
 
         now = time.time()
         if best_box is not None:
@@ -1193,6 +1754,15 @@ class ActivityManager:
             px_height = ymax - ymin
             height_ratio = px_height / float(h)
 
+            # Store segmentation polygon contour in telemetry for live HUD/stream display
+            if best_poly and len(best_poly) >= 3:
+                self.telemetry["target_polygon"] = [[int(pt[0]), int(pt[1])] for pt in best_poly]
+            else:
+                self.telemetry["target_polygon"] = [
+                    [int(xmin), int(ymin)], [int(xmax), int(ymin)],
+                    [int(xmax), int(ymax)], [int(xmin), int(ymax)]
+                ]
+
             # Temporal EMA smoothing for tracking center
             if self._ot_ema_x is None:
                 self._ot_ema_x = float(raw_cx)
@@ -1200,7 +1770,8 @@ class ActivityManager:
                 self._ot_ema_x = 0.35 * float(raw_cx) + 0.65 * self._ot_ema_x
 
             px_center = int(self._ot_ema_x)
-            ex = px_center - cx_img
+            sx, sy = self._get_sweet_spot(w, h)
+            ex = px_center - sx
             target_h = float(self.config.get("object_target_height_ratio", 0.35))
             deadband_x = int(self.config.get("deadband_x", 25))
             h_tol = 0.07
@@ -1209,44 +1780,80 @@ class ActivityManager:
             dist_cm = self.estimate_ground_distance(ymax, h)
             self.telemetry["distance_cm"] = dist_cm
 
+            target_cy = (ymin + ymax) // 2
+            ey = target_cy - sy
+
             self.telemetry["target_found"] = True
+            self.telemetry["target_locked"] = (self._locked_target_center is not None)
             self.telemetry["target_box"] = [int(ymin), int(xmin), int(ymax), int(xmax)]
             self.telemetry["error_x"] = int(ex)
+            self.telemetry["error_y"] = int(ey)
             self.telemetry["target_size"] = round(dist_cm, 1)
 
+            t_speed = self._get_turn_speed()
             f_speed = max(230, int(self.config.get("follow_speed", 230)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             target_dist = float(self.config.get("object_target_distance_cm", 30.0))
 
             # Evaluate target dynamics (Moving vs Stationary Target)
-            target_cy = (ymin + ymax) // 2
             is_moving = self._evaluate_target_dynamics(px_center, target_cy, now)
 
-            # 1. PLAN MOTION WITH VLM FIRST (Computes continuous path and anti-overextension guidance)
-            continuous_drive = False
-            pulse_dur = 0.12
+            # 1. MAP OUT ALL MOVEMENT & KINEMATICS FIRST
+            motion_plan = self._plan_linkage_trajectory(
+                target_name=cat_name,
+                cx=px_center,
+                cy=target_cy,
+                w=w,
+                h=h,
+                dist_cm=dist_cm,
+                target_dist_cm=target_dist,
+                is_moving=is_moving,
+                target_poly=self.telemetry.get("target_polygon")
+            )
+            self.telemetry["motion_plan"] = motion_plan
+            active_stage = motion_plan["active_stage"]
+            left_pwm = active_stage["left_pwm"]
+            right_pwm = active_stage["right_pwm"]
+            action = active_stage["action"]
+            continuous_drive = active_stage.get("continuous", False)
+            pulse_dur = active_stage.get("duration_s", 0.12)
+
             if self.vlm_planner:
-                sweet_spot = {"center_x": cx_img, "center_y": int(h * 0.52), "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
+                sweet_spot = {"center_x": sx, "center_y": sy, "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
                 mock_det = DetectionResult(
                     detected=True,
                     category=cat_name,
                     confidence=conf,
                     bounding_box=(ymin, xmin, ymax, xmax),
-                    material_color="Dynamic"
+                    material_color="Dynamic",
+                    mask_polygon=self.telemetry.get("target_polygon")
                 )
                 vlm_plan = self.vlm_planner.plan_movement(
                     mock_det,
                     sweet_spot,
+                    use_vlm_llm=False,
                     dist_cm=dist_cm,
                     target_dist_cm=float(target_dist),
                     target_is_moving=is_moving
                 )
                 self.telemetry["vlm_plan"] = vlm_plan.to_dict()
-                left_pwm = vlm_plan.left_pwm
-                right_pwm = vlm_plan.right_pwm
-                action = vlm_plan.action
-                continuous_drive = vlm_plan.continuous_drive
-                pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+                if vlm_plan.continuous_drive:
+                    left_pwm = vlm_plan.left_pwm
+                    right_pwm = vlm_plan.right_pwm
+                    action = vlm_plan.action
+                    continuous_drive = True
+                    pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+
+                # Hard turn speed floor guarantee
+                if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
+                    if left_pwm > 0 and left_pwm < t_speed:
+                        left_pwm = t_speed
+                    elif left_pwm < 0 and left_pwm > -t_speed:
+                        left_pwm = -t_speed
+                    if right_pwm > 0 and right_pwm < t_speed:
+                        right_pwm = t_speed
+                    elif right_pwm < 0 and right_pwm > -t_speed:
+                        right_pwm = -t_speed
 
                 if (left_pwm != 0 or right_pwm != 0):
                     self.vlm_planner.record_feedback(
@@ -1266,7 +1873,7 @@ class ActivityManager:
                         action = "TURN_RIGHT"
                         if height_ratio < (target_h - h_tol):
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
-                            left_pwm = min(255, f_speed + steer_bias)
+                            left_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             right_pwm = max(180, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
@@ -1275,7 +1882,7 @@ class ActivityManager:
                         action = "TURN_LEFT"
                         if height_ratio < (target_h - h_tol):
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
-                            right_pwm = min(255, f_speed + steer_bias)
+                            right_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             left_pwm = max(180, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
@@ -1293,9 +1900,25 @@ class ActivityManager:
                     action = "ALIGNED_HOLD"
                     left_pwm, right_pwm = 0, 0
 
-            # Arm elevation tracking (IK-like pitch up/down within servo bounds synced to latency)
+            # Arm elevation tracking (smooth hardware interpolation)
             dt_lat = max(0.04, time.time() - now)
             self._track_arm_elevation(target_cy, h, latency_s=dt_lat)
+
+            # Settle & Autonomous Grab Trigger:
+            # If target object is centered horizontally and vertically, within grasp range, and steady:
+            is_x_centered = abs(ex) <= deadband_x
+            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
+            is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
+
+            if is_x_centered and is_y_centered and is_near and not is_moving:
+                self._ik_settled_frames += 1
+                if self._ik_settled_frames >= 10 and not self._is_grabbing:
+                    self._trigger_autonomous_grab(cat_name)
+            else:
+                self._ik_settled_frames = max(0, self._ik_settled_frames - 1)
+
+            if self._is_grabbing:
+                return last_seen
 
             is_motion = self.config.get("motion_enabled", True)
             if not is_motion:
@@ -1314,11 +1937,18 @@ class ActivityManager:
         else:
             self.telemetry["target_found"] = False
             self.telemetry["target_box"] = []
+            self.telemetry["target_polygon"] = []
+            self.telemetry["motion_plan"] = None
             self._target_dyn_history.clear()
             self._target_is_moving = False
             lost_duration = now - last_seen
             if lost_duration > 3.0:
                 self._ot_ema_x = None
+                self._locked_target_center = None
+                self._locked_target_label = None
+                self._locked_target_lost_frames = 0
+                self._locked_target_frames = 0
+                self.telemetry["target_locked"] = False
                 self.telemetry["status"] = "SEARCHING"
                 self.telemetry["action"] = "STOPPED"
                 self.telemetry["details"] = f"Searching for '{target_obj}' in view..."
@@ -1329,8 +1959,9 @@ class ActivityManager:
 
     def _step_color_track_and_classify(self, frame: np.ndarray, w: int, h: int, cx_img: int, last_seen: float) -> float:
         """Pursues target color blob while LiteRT neural net identifies what the object is."""
-        target_color = self.config.get("target_color", "Red")
-        ranges = HSV_COLOR_RANGES.get(target_color, HSV_COLOR_RANGES["Red"])
+        target_color = str(self.config.get("target_color", "Red")).strip().capitalize()
+        self.telemetry["target_color"] = target_color
+        ranges = get_hsv_ranges(target_color)
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = None
@@ -1344,20 +1975,62 @@ class ActivityManager:
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        best_cnt = None
-        max_area = 0
+        candidate_blobs = []
         min_detect_area = 200  # Lowered to detect smaller colored objects
-
         for cnt in contours:
             a = cv2.contourArea(cnt)
-            if a > max_area and a >= min_detect_area:
-                max_area = a
-                best_cnt = cnt
+            if a >= min_detect_area:
+                m = cv2.moments(cnt)
+                if m["m00"] > 0:
+                    cand_cx = int(m["m10"] / m["m00"])
+                    cand_cy = int(m["m01"] / m["m00"])
+                else:
+                    bx, by, bbw, bbh = cv2.boundingRect(cnt)
+                    cand_cx, cand_cy = bx + bbw // 2, by + bbh // 2
+                candidate_blobs.append((a, cnt, cand_cx, cand_cy))
+
+        best_cnt = None
+        max_area = 0
+        if candidate_blobs:
+            # Spatial Lock-In: Lock onto first seen target and keep focus on it!
+            if self._locked_target_center is not None and self._locked_target_lost_frames < 25:
+                lx, ly = self._locked_target_center
+                gate_radius = max(240.0, float(w) * 0.55)
+                candidate_blobs.sort(key=lambda b: math.hypot(b[2] - lx, b[3] - ly))
+                closest = candidate_blobs[0]
+                dist_to_lock = math.hypot(closest[2] - lx, closest[3] - ly)
+                if dist_to_lock <= gate_radius or len(candidate_blobs) == 1:
+                    max_area = closest[0]
+                    best_cnt = closest[1]
+                    self._locked_target_center = (closest[2], closest[3])
+                    self._locked_target_lost_frames = 0
+                    self._locked_target_frames += 1
+                else:
+                    self._locked_target_lost_frames += 1
+            else:
+                # Lock onto the first detected target (largest area)
+                candidate_blobs.sort(key=lambda b: b[0], reverse=True)
+                chosen = candidate_blobs[0]
+                max_area = chosen[0]
+                best_cnt = chosen[1]
+                self._locked_target_center = (chosen[2], chosen[3])
+                self._locked_target_label = target_color
+                self._locked_target_lost_frames = 0
+                self._locked_target_frames = 1
+        elif self._locked_target_center is not None:
+            self._locked_target_lost_frames += 1
+            if self._locked_target_lost_frames > 25:
+                self._locked_target_center = None
+                self._locked_target_label = None
+                self._locked_target_frames = 0
 
         now = time.time()
         if best_cnt is not None:
             last_seen = now
             x, y, bw, bh = cv2.boundingRect(best_cnt)
+            # Store segmentation polygon contour in telemetry for live HUD/stream display
+            approx = cv2.approxPolyDP(best_cnt, epsilon=2.0, closed=True)
+            self.telemetry["target_polygon"] = [[int(p[0][0]), int(p[0][1])] for p in approx]
             m = cv2.moments(best_cnt)
             if m["m00"] > 0:
                 raw_cx = int(m["m10"] / m["m00"])
@@ -1375,9 +2048,12 @@ class ActivityManager:
             cx = int(self._ct_ema_x)
             cy = int(self._ct_ema_y)
 
+            sx, sy = self._get_sweet_spot(w, h)
+            ex = cx - sx
+            ey = cy - sy
+
             total_area = float(w * h)
             area_ratio = max_area / total_area
-            ex = cx - cx_img
 
             # Neural object classification on the detected color blob
             classified_label = "Object"
@@ -1419,10 +2095,13 @@ class ActivityManager:
             self.telemetry["distance_cm"] = dist_cm
 
             self.telemetry["target_found"] = True
+            self.telemetry["target_locked"] = (self._locked_target_center is not None)
             self.telemetry["target_box"] = [int(y), int(x), int(y + bh), int(x + bw)]
             self.telemetry["error_x"] = int(ex)
+            self.telemetry["error_y"] = int(ey)
             self.telemetry["target_size"] = round(dist_cm, 1)
 
+            t_speed = self._get_turn_speed()
             f_speed = max(230, int(self.config.get("follow_speed", 230)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             target_dist = float(self.config.get("color_target_distance_cm", 25.0))
@@ -1430,31 +2109,62 @@ class ActivityManager:
             # Evaluate target dynamics (Moving vs Stationary Target)
             is_moving = self._evaluate_target_dynamics(cx, cy, now)
 
-            # 1. PLAN MOTION WITH VLM FIRST (Computes continuous path and anti-overextension guidance)
-            continuous_drive = False
-            pulse_dur = 0.12
+            # 1. MAP OUT ALL MOVEMENT & KINEMATICS FIRST
+            motion_plan = self._plan_linkage_trajectory(
+                target_name=full_title,
+                cx=cx,
+                cy=cy,
+                w=w,
+                h=h,
+                dist_cm=dist_cm,
+                target_dist_cm=target_dist,
+                is_moving=is_moving,
+                target_poly=self.telemetry.get("target_polygon")
+            )
+            self.telemetry["motion_plan"] = motion_plan
+            active_stage = motion_plan["active_stage"]
+            left_pwm = active_stage["left_pwm"]
+            right_pwm = active_stage["right_pwm"]
+            action = active_stage["action"]
+            continuous_drive = active_stage.get("continuous", False)
+            pulse_dur = active_stage.get("duration_s", 0.12)
+
             if self.vlm_planner:
-                sweet_spot = {"center_x": cx_img, "center_y": int(h * 0.52), "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
+                sweet_spot = {"center_x": sx, "center_y": sy, "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
                 mock_det = DetectionResult(
                     detected=True,
                     category=classified_label.lower(),
                     confidence=max(0.70, class_conf),
                     bounding_box=(y, x, y + bh, x + bw),
-                    material_color=target_color
+                    material_color=target_color,
+                    mask_polygon=self.telemetry.get("target_polygon")
                 )
                 vlm_plan = self.vlm_planner.plan_movement(
                     mock_det,
                     sweet_spot,
+                    use_vlm_llm=False,
                     dist_cm=dist_cm,
                     target_dist_cm=float(target_dist),
                     target_is_moving=is_moving
                 )
                 self.telemetry["vlm_plan"] = vlm_plan.to_dict()
-                left_pwm = vlm_plan.left_pwm
-                right_pwm = vlm_plan.right_pwm
-                action = vlm_plan.action
-                continuous_drive = vlm_plan.continuous_drive
-                pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+                if vlm_plan.continuous_drive:
+                    left_pwm = vlm_plan.left_pwm
+                    right_pwm = vlm_plan.right_pwm
+                    action = vlm_plan.action
+                    continuous_drive = True
+                    pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+
+                # Hard turn speed floor guarantee
+                if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
+                    if left_pwm > 0 and left_pwm < t_speed:
+                        left_pwm = t_speed
+                    elif left_pwm < 0 and left_pwm > -t_speed:
+                        left_pwm = -t_speed
+                    if right_pwm > 0 and right_pwm < t_speed:
+                        right_pwm = t_speed
+                    elif right_pwm < 0 and right_pwm > -t_speed:
+                        right_pwm = -t_speed
 
                 if (left_pwm != 0 or right_pwm != 0):
                     self.vlm_planner.record_feedback(
@@ -1474,7 +2184,7 @@ class ActivityManager:
                         action = "TURN_RIGHT"
                         if area_ratio < target_area_ratio:
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
-                            left_pwm = min(255, f_speed + steer_bias)
+                            left_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             right_pwm = max(180, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
@@ -1483,7 +2193,7 @@ class ActivityManager:
                         action = "TURN_LEFT"
                         if area_ratio < target_area_ratio:
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
-                            right_pwm = min(255, f_speed + steer_bias)
+                            right_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             left_pwm = max(180, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
@@ -1497,9 +2207,25 @@ class ActivityManager:
                     action = "ALIGNED_AT_TARGET"
                     left_pwm, right_pwm = 0, 0
 
-            # Arm elevation tracking (IK-like pitch up/down within servo bounds synced to latency)
+            # Arm elevation tracking (smooth hardware interpolation)
             dt_lat = max(0.04, time.time() - now)
             self._track_arm_elevation(cy, h, latency_s=dt_lat)
+
+            # Settle & Autonomous Grab Trigger:
+            # If target is centered horizontally and vertically, within grasp range, and steady:
+            is_x_centered = abs(ex) <= deadband_x
+            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
+            is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
+
+            if is_x_centered and is_y_centered and is_near and not is_moving:
+                self._ik_settled_frames += 1
+                if self._ik_settled_frames >= 10 and not self._is_grabbing:
+                    self._trigger_autonomous_grab(full_title)
+            else:
+                self._ik_settled_frames = max(0, self._ik_settled_frames - 1)
+
+            if self._is_grabbing:
+                return last_seen
 
             is_motion = self.config.get("motion_enabled", True)
             if not is_motion:
@@ -1519,12 +2245,19 @@ class ActivityManager:
         else:
             self.telemetry["target_found"] = False
             self.telemetry["target_box"] = []
+            self.telemetry["target_polygon"] = []
+            self.telemetry["motion_plan"] = None
             self._target_dyn_history.clear()
             self._target_is_moving = False
             lost_duration = now - last_seen
             if lost_duration > 1.2:
                 self._ct_ema_x = None
                 self._ct_ema_y = None
+                self._locked_target_center = None
+                self._locked_target_label = None
+                self._locked_target_lost_frames = 0
+                self._locked_target_frames = 0
+                self.telemetry["target_locked"] = False
                 self.telemetry["status"] = "SEARCHING"
                 self.telemetry["action"] = "STOPPED"
                 self.telemetry["details"] = f"Searching for {target_color} objects in view..."
@@ -1539,11 +2272,13 @@ class ActivityManager:
         best_cand = None
         best_score = 0.0
 
-        # Background scenery, architecture, and human classes to exclude unless explicitly targeted
-        SCENERY_CLASSES = {
+        # Classes of large objects, scenery, architecture, vehicles, and furniture to exclude
+        LARGE_AND_SCENERY_CLASSES = {
             "wall", "floor", "ground", "ceiling", "sky", "scenery", "background",
             "room", "window", "door", "building", "person", "man", "woman", "boy", "girl",
-            "chair", "table", "bed", "couch", "sofa", "bench", "tree", "plant"
+            "chair", "table", "desk", "bed", "couch", "sofa", "bench", "tree", "plant",
+            "tv", "refrigerator", "oven", "microwave", "sink", "car", "truck", "bus", "train",
+            "motorcycle", "bicycle", "cabinet", "wardrobe", "shelf", "dining table"
         }
 
         if self.vision:
@@ -1553,8 +2288,8 @@ class ActivityManager:
                     cat = d.category.lower().strip()
                     if filter_target != "any" and filter_target not in cat:
                         continue
-                    # Ignore scenery classes when searching for 'any' object
-                    if filter_target == "any" and any(sc in cat for sc in SCENERY_CLASSES):
+                    # Ignore large scenery, furniture, and vehicles
+                    if filter_target == "any" and any(sc in cat for sc in LARGE_AND_SCENERY_CLASSES):
                         continue
                     if d.confidence < 0.20:
                         continue
@@ -1567,20 +2302,22 @@ class ActivityManager:
                         if bw <= 10 or bh <= 10:
                             continue
                         area = bw * bh
-                        # Reject massive bounding boxes spanning > 60% of frame area or > 85% width/height (scenery/walls)
-                        if area > (w * h * 0.60) or bw > (w * 0.85) or bh > (h * 0.85):
+                        # STRICT SMALL-OBJECT FILTER:
+                        # Avoid scanning for large objects! Reject any object spanning > 22% of frame area, > 38% width, or > 48% height
+                        if area > (w * h * 0.22) or bw > (w * 0.38) or bh > (h * 0.48):
                             continue
 
                         # Prioritize objects centered in front of camera (sweet spot alignment)
                         cand_cx = (xmin + xmax) // 2
                         cand_cy = (ymin + ymax) // 2
                         dx_norm = abs(cand_cx - cx_img) / float(w // 2)
-                        dy_norm = abs(cand_cy - int(h * 0.52)) / float(h // 2)
+                        dy_norm = abs(cand_cy - int(h * 0.515)) / float(h // 2)
                         center_proximity = max(0.0, 1.0 - (dx_norm * 0.6 + dy_norm * 0.4))
 
-                        # Balanced score: high confidence + center proximity + reasonable tabletop object area
-                        area_norm = min(1.0, area / float(w * h * 0.20))
-                        cand_score = (d.confidence * 40.0) + (center_proximity * 45.0) + (area_norm * 15.0)
+                        # Strongly favor small, compact tabletop graspable objects (bonus for small footprint)
+                        is_compact_small = (bw < int(w * 0.24) and bh < int(h * 0.35))
+                        small_bonus = 35.0 if is_compact_small else 10.0
+                        cand_score = (d.confidence * 35.0) + (center_proximity * 35.0) + small_bonus
 
                         if cand_score > best_score:
                             best_score = cand_score
@@ -1596,7 +2333,8 @@ class ActivityManager:
             raw_w = float(xmax - xmin)
             raw_h = float(ymax - ymin)
             px_center = (xmin + xmax) // 2
-            ex = px_center - cx_img
+            sx, sy = self._get_sweet_spot(w, h)
+            ex = px_center - sx
 
             # Temporal exponential moving average (EMA) filter to prevent jitter
             if self._sizing_ema_w is None:
@@ -1651,7 +2389,7 @@ class ActivityManager:
             self.telemetry["distance_cm"] = dist_cm
             self.telemetry["target_found"] = True
             self.telemetry["target_box"] = [int(ymin), int(xmin), int(ymax), int(xmax)]
-            self.telemetry["target_polygon"] = list(poly) if poly else []
+            self.telemetry["target_polygon"] = [[int(pt[0]), int(pt[1])] for pt in poly] if poly else []
             self.telemetry["error_x"] = int(ex)
             self.telemetry["target_size"] = round(dist_cm, 1)
             self.telemetry["sizing"] = {
@@ -1668,6 +2406,7 @@ class ActivityManager:
                 "gripper_msg": gripper_msg,
             }
 
+            t_speed = self._get_turn_speed()
             f_speed = max(230, int(self.config.get("follow_speed", 230)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
             target_dist = float(self.config.get("sizing_target_distance_cm", 28.0))
@@ -1681,7 +2420,7 @@ class ActivityManager:
             continuous_drive = False
             pulse_dur = 0.12
             if self.vlm_planner:
-                sweet_spot = {"center_x": cx_img, "center_y": int(h * 0.52), "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
+                sweet_spot = {"center_x": sx, "center_y": sy, "box_width": int(w * 0.35), "box_height": int(h * 0.35)}
                 mock_det = DetectionResult(
                     detected=True,
                     category=cat_name,
@@ -1702,6 +2441,17 @@ class ActivityManager:
                 action = vlm_plan.action
                 continuous_drive = vlm_plan.continuous_drive
                 pulse_dur = max(0.08, min(0.20, vlm_plan.duration_ms / 1000.0))
+
+                # Hard turn speed floor guarantee
+                if "TURN" in action or "CENTER" in action or "PIVOT" in action:
+                    if left_pwm > 0 and left_pwm < t_speed:
+                        left_pwm = t_speed
+                    elif left_pwm < 0 and left_pwm > -t_speed:
+                        left_pwm = -t_speed
+                    if right_pwm > 0 and right_pwm < t_speed:
+                        right_pwm = t_speed
+                    elif right_pwm < 0 and right_pwm > -t_speed:
+                        right_pwm = -t_speed
 
                 if (left_pwm != 0 or right_pwm != 0):
                     self.vlm_planner.record_feedback(
@@ -1875,27 +2625,68 @@ class ActivityManager:
         blocked_r = (score_r >= thresh) or (dist_r < 28.0)
 
         c_speed = max(230, int(self.config.get("obstacle_cruise_speed", 230)))
-        t_speed = max(228, int(self.config.get("obstacle_turn_speed", 228)))
+        t_speed = max(self._get_turn_speed(), int(self.config.get("obstacle_turn_speed", 235)))
 
-        # 4. Reactive Avoidance State Machine
+        # 4. Reactive Avoidance State Machine with Arm IK Environmental Scan
         if not blocked_c and not blocked_l and not blocked_r:
+            self._oa_scan_state = "IDLE"
             action = "CRUISING_FORWARD"
             clear_path = "FORWARD"
             left_pwm, right_pwm = self._apply_trim(c_speed)
         elif blocked_c:
-            if not blocked_r and (dist_r > dist_l or score_r <= score_l):
-                action = "AVOID_RIGHT"
-                clear_path = "RIGHT"
-                left_pwm, right_pwm = t_speed, -t_speed
-            elif not blocked_l:
-                action = "AVOID_LEFT"
-                clear_path = "LEFT"
-                left_pwm, right_pwm = -t_speed, t_speed
-            else:
-                action = "ESCAPE_BACKUP"
-                clear_path = "REVERSE"
-                lp, rp = self._apply_trim(c_speed)
-                left_pwm, right_pwm = -lp, -rp
+            # Front obstruction suspected: Use Arm IK to inspect environment before concluding obstruction!
+            if self._oa_scan_state == "IDLE":
+                self._oa_scan_state = "SCAN_ELEVATE"
+                self._oa_scan_start_t = now
+                action = "IK_ENVIRONMENT_SCAN"
+                clear_path = "SCANNING"
+                left_pwm, right_pwm = 0, 0
+                if self.comm:
+                    self.comm.send_stop()
+                # Elevate arm via IK to Horizon Scan pose to check true 3D horizon
+                self._track_arm_elevation(int(h * 0.38), h, latency_s=0.08)
+                self.telemetry["details"] = "Obstruction suspected in front. Scanning 3D environment with Arm IK..."
+            elif self._oa_scan_state == "SCAN_ELEVATE":
+                # Give servos 0.25s to reach elevated scan pose and let camera stabilize
+                if (now - self._oa_scan_start_t) >= 0.25:
+                    self._oa_scan_state = "SCAN_VERIFY"
+                action = "IK_ENVIRONMENT_SCAN"
+                clear_path = "SCANNING"
+                left_pwm, right_pwm = 0, 0
+            elif self._oa_scan_state == "SCAN_VERIFY":
+                # Verify whether the elevated view still detects solid obstacles in front
+                has_ai_obstacle_in_center = any(
+                    ((bb_xmin + bb_xmax) // 2) >= col_w and ((bb_xmin + bb_xmax) // 2) < 2 * col_w
+                    for _, bb_xmin, _, bb_xmax, _, _ in active_boxes
+                )
+                is_solid_3d_obstacle = (score_c >= (thresh * 1.25)) or (dist_c < 24.0) or has_ai_obstacle_in_center
+
+                if is_solid_3d_obstacle:
+                    # Confirmed genuine 3D obstacle in front!
+                    self._oa_scan_state = "AVOID"
+                    self.telemetry["details"] = "Arm IK scan CONFIRMED physical obstacle! Executing avoidance maneuver."
+                else:
+                    # Elevated scan revealed center is clear (floor shadow/grout line dismissed)
+                    self._oa_scan_state = "IDLE"
+                    self.telemetry["details"] = "Arm IK scan cleared center path (floor artifact discarded). Resuming cruise."
+                    action = "CRUISING_FORWARD"
+                    clear_path = "FORWARD"
+                    left_pwm, right_pwm = self._apply_trim(c_speed)
+
+            if self._oa_scan_state == "AVOID":
+                if not blocked_r and (dist_r > dist_l or score_r <= score_l):
+                    action = "AVOID_RIGHT"
+                    clear_path = "RIGHT"
+                    left_pwm, right_pwm = t_speed, -t_speed
+                elif not blocked_l:
+                    action = "AVOID_LEFT"
+                    clear_path = "LEFT"
+                    left_pwm, right_pwm = -t_speed, t_speed
+                else:
+                    action = "ESCAPE_BACKUP"
+                    clear_path = "REVERSE"
+                    lp, rp = self._apply_trim(c_speed)
+                    left_pwm, right_pwm = -lp, -rp
         elif blocked_l and not blocked_r:
             action = "VEER_RIGHT"
             clear_path = "RIGHT_FORWARD"

@@ -11,7 +11,7 @@ motors:
   nudge_pwm: 250
   swap_left_right: true
   trim_offset: 6
-  turn_speed: 228
+  turn_speed: 235
 servos:
   lead_deg: 0
   servo1_shoulder:

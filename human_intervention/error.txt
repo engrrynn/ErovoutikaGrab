@@ -184,3 +184,40 @@ the vlm should be implemented always why is there a plan with vlm and execute pl
       5. Verification & Test Suite:
          - All 39 unit and integration tests passing (`tests/test_vlm_motion_planner.py` + `tests/test_activities.py`).
          - Restarted `egrabbot-web.service` and verified live telemetry stream.
+
+
+
+
+
+
+         ISSUES
+
+         The motion planning and IK still moves in stutter mode its not planning first and then moving after all movement is planned it still thinks and move then think and moves it should map out all the movement to reach that point or linkage first
+         The color tracking doesnt work properly keeps saying red color 
+         The person follower detects slow
+         the main cam feed detects more faster that the activities and it has contours lets say for person following the activity does not have contours
+         
+
+
+
+         Nearly there:
+
+         Make the servo motor decisive in its movement what i notice is that it does not stay still and the vlm keeps saying overshooting, i want it to center the linkage to the sweet spot
+         right now the motion is smooth but needs a bit more decisiveness and less oscillation if the object is near and the IK has settled initiate grab mechanism
+         
+         in the object sizing avoid scanning for large objects only small objects
+
+         also fix the obstacle avoidance implement IK to scan for the environment first before concluding obstruction infront
+
+         the target object should have a dropdown selection of the available trained object
+
+
+
+
+
+         Next Improvement:
+         Make the camera lock in to what it sees first then it should focus on grabbing that for object and color tracking 
+        
+          in autonomous mode make the vlm do everything to center match the linkage to the sweet spot crosshair the same with stationary mode use the servo arm and turning mechanism
+        
+        the turn speed set in the robot config should be the baseline speed no less but it can be more 

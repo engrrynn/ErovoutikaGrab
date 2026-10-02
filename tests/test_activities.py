@@ -667,3 +667,135 @@ def test_vlm_adaptation_in_activity():
     assert len(stats["recent_history"]) >= 1
     manager.stop_activity()
 
+
+def test_color_tracking_target_locking():
+    """Verify camera locks onto what it sees first and does not jump to a larger competing color blob."""
+    comm = MockCommAdapter()
+    comm.connect()
+    manager = ActivityManager(comm=comm)
+    manager.start_activity("color_tracking", {"target_color": "Red"})
+
+    # Frame 1: Initial target blob at (x=200, y=220) with area 25x25 = 625px
+    frame1 = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame1[220:245, 200:225] = [0, 0, 255]
+    manager._step_color_tracking(frame1, 640, 480, 320, time.time())
+    st1 = manager.get_status()
+    assert st1["target_found"] is True
+    assert st1["target_locked"] is True
+    initial_locked_box = st1["target_box"]
+    assert initial_locked_box[1] == 200  # xmin == 200
+
+    # Frame 2: Keep target at x=200, but introduce a much larger competing red blob at x=500
+    frame2 = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame2[220:245, 200:225] = [0, 0, 255]  # Original target (625px)
+    frame2[200:270, 480:550] = [0, 0, 255]  # Competing larger target (4900px)
+
+    manager._step_color_tracking(frame2, 640, 480, 320, time.time())
+    st2 = manager.get_status()
+    assert st2["target_found"] is True
+    assert st2["target_locked"] is True
+    # Must stay locked to initial target near x=200, NEVER jump to x=500!
+    assert abs(st2["target_box"][1] - 200) < 15
+    manager.stop_activity()
+
+
+def test_object_tracking_target_locking():
+    """Verify object tracking locks onto the first detected instance and does not flicker to new instances."""
+    comm = MockCommAdapter()
+    comm.connect()
+    # Initial bottle A at x=200
+    bottle_a = DetectionResult(
+        category="bottle",
+        confidence=0.72,
+        bounding_box=[180, 190, 260, 240],  # cx=215
+        pickable=True
+    )
+    # Competing larger/higher confidence bottle B at x=450
+    bottle_b = DetectionResult(
+        category="bottle",
+        confidence=0.98,
+        bounding_box=[160, 420, 290, 510],  # cx=465, larger area & higher conf
+        pickable=True
+    )
+
+    vision = DummyVisionWithPerson([bottle_a])
+    manager = ActivityManager(comm=comm, vision=vision)
+    manager.start_activity("object_tracking", {"target_object": "bottle"})
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    manager._step_object_tracking(frame, 640, 480, 320, time.time())
+    st1 = manager.get_status()
+    assert st1["target_found"] is True
+    assert st1["target_locked"] is True
+    assert abs(st1["target_box"][1] - 190) < 10
+
+    # Step 2: Both bottles are visible now; camera must stay locked to bottle A
+    vision.detections = [bottle_a, bottle_b]
+    manager._step_object_tracking(frame, 640, 480, 320, time.time())
+    st2 = manager.get_status()
+    assert st2["target_found"] is True
+    assert st2["target_locked"] is True
+    # Must remain locked on bottle A near x=190, not switch to bottle B at x=420
+    assert abs(st2["target_box"][1] - 190) < 15
+    manager.stop_activity()
+
+
+def test_turn_speed_floor_constraint():
+    """Verify that baseline turn speed from robot_config.yaml is the hard floor for all turning actions."""
+    manager = ActivityManager()
+    baseline = manager._get_turn_speed()
+    assert baseline >= 235
+
+    # Check diminishing turn PWM never drops below baseline
+    w = 640
+    pwm_small_err = manager._compute_diminishing_turn_pwm(35, w)
+    assert pwm_small_err >= baseline
+
+    # Check trajectory plan turning stages respect floor
+    plan = manager._plan_linkage_trajectory(
+        target_name="test_target",
+        cx=100,  # Large horizontal error dx < 0
+        cy=247,
+        w=640,
+        h=480,
+        dist_cm=20.0,
+        target_dist_cm=30.0,
+        is_moving=False
+    )
+    turn_stage = plan["stages"][0]
+    assert abs(turn_stage["left_pwm"]) >= baseline
+    assert abs(turn_stage["right_pwm"]) >= baseline
+
+
+def test_linkage_centering_to_calibrated_sweet_spot():
+    """Verify horizontal error ex and vertical error ey reference the calibrated sweet spot crosshair (sx, sy)."""
+    comm = MockCommAdapter()
+    comm.connect()
+    manager = ActivityManager(comm=comm)
+    sx, sy = manager._get_sweet_spot(640, 480)
+    assert sx == 324
+    assert sy == 247
+
+    # Target placed precisely at the calibrated sweet spot crosshair
+    target = DetectionResult(
+        category="cup",
+        confidence=0.92,
+        bounding_box=[sy - 20, sx - 20, sy + 20, sx + 20],  # Centroid exactly at (324, 247)
+        pickable=True
+    )
+    vision = DummyVisionWithPerson([target])
+    manager.vision = vision
+    manager.start_activity("object_tracking", {"target_object": "cup"})
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    manager._step_object_tracking(frame, 640, 480, 320, time.time())
+    st = manager.get_status()
+
+    assert st["target_found"] is True
+    # Error relative to sweet spot must be virtually zero
+    assert abs(st["error_x"]) <= 2
+    assert abs(st["error_y"]) <= 2
+    assert st["arm_ik"]["vertical_status"] == "CENTERED"
+    manager.stop_activity()
+
+

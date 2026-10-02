@@ -7,7 +7,7 @@ activities:
     color: Red
     follow_speed: 215
     target_area: 12
-  motion_enabled: true
+  motion_enabled: false
   object_sizing:
     align_speed: 195
     filter_object: bottle
@@ -37,8 +37,8 @@ color_detection:
 grasp_sweet_spot:
   align_tolerance_x: 20
   align_tolerance_y: 25
-  box_height: 157
-  box_width: 196
+  box_height: 40
+  box_width: 50
   center_x: 324
   center_y: 247
 tracker:
@@ -49,7 +49,7 @@ yoloe:
   confidence_threshold: 0.25
   enforce_limitations: false
   imgsz: 320
-  model_path: models/yoloe-11l-seg-pf.pt
+  model_path: models/yoloe-11s-seg-pf.pt
   num_threads: 4
   pickable_classes:
   - bottle

@@ -1914,9 +1914,67 @@ HTML_PAGE = """<!DOCTYPE html>
         <button class="target-chip" data-obj="chair" onclick="setTrackingObjectPreset('chair', this)">🪑 Chair</button>
         <button class="target-chip" data-obj="backpack" onclick="setTrackingObjectPreset('backpack', this)">🎒 Backpack</button>
       </div>
-      <div style="display:flex; gap:8px; align-items:center; margin-top:4px;">
-        <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Target Object:</span>
-        <input type="text" id="ot_target_input" value="__OT_TARGET__" placeholder="e.g. bottle, cup, laptop" style="flex:1; background:#070d1d; color:#fff; border:1px solid var(--border); padding:6px 10px; border-radius:6px; font-size:13px;" oninput="onCustomObjectInput(this.value)">
+      <div style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span style="font-size:12px; font-weight:700; color:var(--text-muted); white-space:nowrap;">Select Object:</span>
+          <select id="ot_target_select" onchange="onSelectTrackingObject(this.value)" style="flex:1; background:#070d1d; color:#38bdf8; border:1px solid var(--border); padding:7px 10px; border-radius:6px; font-size:13px; font-weight:700; cursor:pointer;">
+            <optgroup label="🥤 Drinkware & Containers">
+              <option value="bottle">🍾 Bottle</option>
+              <option value="cup">☕ Cup</option>
+              <option value="wine glass">🍷 Wine Glass</option>
+              <option value="bowl">🥣 Bowl</option>
+              <option value="can">🥫 Can</option>
+            </optgroup>
+            <optgroup label="🍎 Fruits & Small Foods">
+              <option value="apple">🍎 Apple</option>
+              <option value="banana">🍌 Banana</option>
+              <option value="orange">🍊 Orange</option>
+              <option value="sandwich">🥪 Sandwich</option>
+              <option value="broccoli">🥦 Broccoli</option>
+              <option value="carrot">🥕 Carrot</option>
+              <option value="hot dog">🌭 Hot Dog</option>
+              <option value="pizza">🍕 Pizza</option>
+              <option value="donut">🍩 Donut</option>
+              <option value="cake">🍰 Cake</option>
+            </optgroup>
+            <optgroup label="📱 Tech & Office Gadgets">
+              <option value="cell phone">📱 Cell Phone</option>
+              <option value="mouse">🖱️ Mouse</option>
+              <option value="remote">📺 Remote</option>
+              <option value="keyboard">⌨️ Keyboard</option>
+              <option value="laptop">💻 Laptop</option>
+              <option value="book">📖 Book</option>
+              <option value="clock">⏰ Clock</option>
+            </optgroup>
+            <optgroup label="✂️ Tools & Utensils">
+              <option value="scissors">✂️ Scissors</option>
+              <option value="fork">🍴 Fork</option>
+              <option value="knife">🔪 Knife</option>
+              <option value="spoon">🥄 Spoon</option>
+              <option value="toothbrush">🪥 Toothbrush</option>
+              <option value="vase">🏺 Vase</option>
+            </optgroup>
+            <optgroup label="⚽ Sports & Toys">
+              <option value="sports ball">⚽ Sports Ball</option>
+              <option value="frisbee">🥏 Frisbee</option>
+              <option value="baseball glove">🧤 Baseball Glove</option>
+              <option value="teddy bear">🧸 Teddy Bear</option>
+            </optgroup>
+            <optgroup label="🎒 Personal Items & Bags">
+              <option value="backpack">🎒 Backpack</option>
+              <option value="handbag">👜 Handbag</option>
+              <option value="suitcase">🧳 Suitcase</option>
+              <option value="umbrella">☂️ Umbrella</option>
+            </optgroup>
+            <optgroup label="✍️ Custom / Open Vocabulary">
+              <option value="custom">✏️ Custom Object (type below)...</option>
+            </optgroup>
+          </select>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Target Object:</span>
+          <input type="text" id="ot_target_input" value="__OT_TARGET__" placeholder="e.g. bottle, cup, laptop" style="flex:1; background:#070d1d; color:#fff; border:1px solid var(--border); padding:6px 10px; border-radius:6px; font-size:13px;" oninput="onCustomObjectInput(this.value)">
+        </div>
       </div>
       <div class="slider-group">
         <div class="slider-header">
@@ -1999,9 +2057,38 @@ HTML_PAGE = """<!DOCTYPE html>
         <button class="target-chip" data-obj="book" onclick="setSizingObjectPreset('book', this)">📖 Book</button>
         <button class="target-chip" data-obj="apple" onclick="setSizingObjectPreset('apple', this)">🍎 Apple</button>
       </div>
-      <div style="display:flex; gap:8px; align-items:center; margin-top:2px;">
-        <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Filter Target:</span>
-        <input type="text" id="os_target_input" value="__OS_TARGET__" placeholder="e.g. any, bottle, cup, box" style="flex:1; background:#070d1d; color:#fff; border:1px solid var(--border); padding:6px 10px; border-radius:6px; font-size:13px;" oninput="onCustomSizingInput(this.value)">
+      <div style="display:flex; flex-direction:column; gap:6px; margin-top:4px;">
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span style="font-size:12px; font-weight:700; color:var(--text-muted); white-space:nowrap;">Select Target:</span>
+          <select id="os_target_select" onchange="onSelectSizingObject(this.value)" style="flex:1; background:#070d1d; color:#38bdf8; border:1px solid var(--border); padding:7px 10px; border-radius:6px; font-size:13px; font-weight:700; cursor:pointer;">
+            <option value="any">🔍 Any Small Object (<=85mm)</option>
+            <optgroup label="🥤 Small Containers & Drinkware">
+              <option value="bottle">🍾 Bottle</option>
+              <option value="cup">☕ Cup</option>
+              <option value="can">🥫 Can</option>
+              <option value="bowl">🥣 Small Bowl</option>
+            </optgroup>
+            <optgroup label="🍎 Fruits & Small Foods">
+              <option value="apple">🍎 Apple</option>
+              <option value="orange">🍊 Orange</option>
+              <option value="banana">🍌 Banana</option>
+              <option value="sandwich">🥪 Sandwich</option>
+            </optgroup>
+            <optgroup label="📱 Tech Gadgets & Desktop Items">
+              <option value="cell phone">📱 Cell Phone</option>
+              <option value="mouse">🖱️ Mouse</option>
+              <option value="book">📖 Small Book</option>
+              <option value="sports ball">⚽ Ball</option>
+            </optgroup>
+            <optgroup label="✍️ Custom Target">
+              <option value="custom">✏️ Custom Target (type below)...</option>
+            </optgroup>
+          </select>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Filter Target:</span>
+          <input type="text" id="os_target_input" value="__OS_TARGET__" placeholder="e.g. any, bottle, cup, apple" style="flex:1; background:#070d1d; color:#fff; border:1px solid var(--border); padding:6px 10px; border-radius:6px; font-size:13px;" oninput="onCustomSizingInput(this.value)">
+        </div>
       </div>
 
       <!-- Real-Time Sizing Telemetry Display -->
@@ -3649,6 +3736,15 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
+    function onSelectTrackingObject(val) {
+      if (val === 'custom') {
+        const inp = document.getElementById('ot_target_input');
+        if (inp) inp.focus();
+        return;
+      }
+      setTrackingObjectPreset(val, null);
+    }
+
     function setTrackingObjectPreset(objName, chipEl) {
       const clean = (objName || 'bottle').trim().toLowerCase();
       const container = document.getElementById('ot_chips');
@@ -3661,6 +3757,19 @@ HTML_PAGE = """<!DOCTYPE html>
       if (chipEl) chipEl.classList.add('active');
       const inp = document.getElementById('ot_target_input');
       if (inp) inp.value = clean;
+
+      const sel = document.getElementById('ot_target_select');
+      if (sel) {
+        let matched = false;
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === clean) {
+            sel.selectedIndex = i;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) sel.value = 'custom';
+      }
     }
 
     function onCustomObjectInput(val) {
@@ -3674,6 +3783,18 @@ HTML_PAGE = """<!DOCTYPE html>
             c.classList.remove('active');
           }
         });
+      }
+      const sel = document.getElementById('ot_target_select');
+      if (sel) {
+        let matched = false;
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === clean) {
+            sel.selectedIndex = i;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) sel.value = 'custom';
       }
     }
 
@@ -3768,6 +3889,15 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     
+    function onSelectSizingObject(val) {
+      if (val === 'custom') {
+        const inp = document.getElementById('os_target_input');
+        if (inp) inp.focus();
+        return;
+      }
+      setSizingObjectPreset(val, null);
+    }
+
     function setSizingObjectPreset(objName, chipEl) {
       const clean = (objName || 'any').trim().toLowerCase();
       const container = document.getElementById('os_chips');
@@ -3779,8 +3909,20 @@ HTML_PAGE = """<!DOCTYPE html>
       }
       if (chipEl) chipEl.classList.add('active');
       const inp = document.getElementById('os_target_input');
-      if (inp) inp.value = objName;
       if (inp) inp.value = clean;
+
+      const sel = document.getElementById('os_target_select');
+      if (sel) {
+        let matched = false;
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === clean) {
+            sel.selectedIndex = i;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) sel.value = 'custom';
+      }
     }
 
     function onCustomSizingInput(val) {
@@ -3794,6 +3936,18 @@ HTML_PAGE = """<!DOCTYPE html>
             c.classList.remove('active');
           }
         });
+      }
+      const sel = document.getElementById('os_target_select');
+      if (sel) {
+        let matched = false;
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === clean) {
+            sel.selectedIndex = i;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) sel.value = 'custom';
       }
     }
 
@@ -4303,6 +4457,18 @@ HTML_PAGE = """<!DOCTYPE html>
       .catch(e => showToast('msg_wifi_global', 'Error setting startup mode: ' + e, '#ef4444'));
     }
 
+    // Initial sync of dropdown selects with target object inputs
+    setTimeout(() => {
+      const otInp = document.getElementById('ot_target_input');
+      if (otInp && otInp.value) {
+        onCustomObjectInput(otInp.value);
+      }
+      const osInp = document.getElementById('os_target_input');
+      if (osInp && osInp.value) {
+        onCustomSizingInput(osInp.value);
+      }
+    }, 200);
+
     // Call initial WiFi status refresh
     setTimeout(refreshWiFiStatus, 1000);
   </script>
@@ -4362,7 +4528,18 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_json(self, data, status=200):
-        body = json.dumps(data).encode("utf-8")
+        def _json_default(obj):
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, (np.ndarray,)):
+                return obj.tolist()
+            if hasattr(obj, "to_dict"):
+                return obj.to_dict()
+            return str(obj)
+
+        body = json.dumps(data, default=_json_default).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -4635,9 +4812,26 @@ class WebHandler(BaseHTTPRequestHandler):
                             if tp and len(tp) >= 3:
                                 poly_pts = np.array(tp, dtype=np.int32).reshape((-1, 1, 2))
                                 overlay = vis.copy()
-                                cv2.fillPoly(overlay, [poly_pts], (0, 255, 255))
-                                cv2.addWeighted(overlay, 0.22, vis, 0.78, 0, vis)
-                                cv2.polylines(vis, [poly_pts], isClosed=True, color=(0, 255, 255), thickness=2)
+                                poly_color = (0, 255, 255)
+                                if act_raw == "person_follower":
+                                    poly_color = (0, 255, 128)  # Neon green for human/legs
+                                elif act_raw in ("color_tracking", "color_track_and_classify"):
+                                    tc = str(act_status.get("target_color", "")).lower()
+                                    color_bgr_map = {
+                                        "red": (0, 0, 255),
+                                        "green": (0, 255, 0),
+                                        "blue": (255, 128, 0),
+                                        "yellow": (0, 255, 255),
+                                        "orange": (0, 140, 255),
+                                        "purple": (200, 0, 200),
+                                        "cyan": (255, 255, 0),
+                                    }
+                                    poly_color = color_bgr_map.get(tc, (0, 255, 255))
+                                elif act_raw == "object_tracking":
+                                    poly_color = (56, 189, 248)  # Sky blue
+                                cv2.fillPoly(overlay, [poly_pts], poly_color)
+                                cv2.addWeighted(overlay, 0.28, vis, 0.72, 0, vis)
+                                cv2.polylines(vis, [poly_pts], isClosed=True, color=poly_color, thickness=2)
 
                             # Draw Visual Servoing Linkage Line for Active Activity Target
                             cv2.circle(vis, (act_tx, act_ty), 5, (0, 0, 255), -1)
@@ -4898,6 +5092,16 @@ class WebHandler(BaseHTTPRequestHandler):
             data = self._read_json()
             act = data.get("activity")
             params = data.get("params", {})
+            if "target_color" in params:
+                c_val = str(params["target_color"]).strip().capitalize()
+                activities_state["ct_color"] = c_val
+                if activity_manager:
+                    activity_manager.config["target_color"] = c_val
+            if "target_object" in params:
+                o_val = str(params["target_object"]).strip().lower()
+                activities_state["ot_target"] = o_val
+                if activity_manager:
+                    activity_manager.config["target_object"] = o_val
             if activity_manager:
                 ok = activity_manager.start_activity(act, params)
                 self._send_json({"status": "ok" if ok else "error", "activity": act, "running": ok})
