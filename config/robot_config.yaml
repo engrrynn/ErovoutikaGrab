@@ -35,4 +35,4 @@ servos:
     min_angle: 40
     open_angle: 170
   step_deg: 2
-  step_delay_s: 0.02
+  step_delay_s: 0.01

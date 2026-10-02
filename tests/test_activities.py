@@ -865,4 +865,48 @@ def test_base_speed_floor_constraint_forward_and_backward():
     assert cmd_rev[2] <= -(base_floor - 10)
 
 
+def test_arm_pose_at_start_and_search():
+    """Verify that when searching for object and color, the servo arm pose is DOWN at start,
+    and when human following it is UP at start.
+    """
+    comm = MockCommAdapter()
+    comm.connect()
+    cam = MockCameraAdapter()
+    manager = ActivityManager(camera=cam, comm=comm)
+
+    # 1. Start Object Tracking: Arm must immediately move DOWN (S1=170, S2=0) with open gripper (S3=170)
+    comm.command_log.clear()
+    ok_ot = manager.start_activity("object_tracking", {"target_object": "bottle"})
+    assert ok_ot is True
+    servo_cmds = [cmd for cmd in comm.command_log if cmd[0] == "SERVO"]
+    assert len(servo_cmds) > 0
+    assert servo_cmds[-1][1] == 170  # S1 down
+    assert servo_cmds[-1][2] == 0    # S2 down
+    assert servo_cmds[-1][3] == 170  # S3 open
+    assert manager._arm_last_s1 == 170
+    assert manager._arm_last_s2 == 0
+
+    # 2. Start Color Tracking: Arm must also be DOWN at start
+    comm.command_log.clear()
+    ok_ct = manager.start_activity("color_tracking", {"target_color": "Green"})
+    assert ok_ct is True
+    servo_cmds = [cmd for cmd in comm.command_log if cmd[0] == "SERVO"]
+    assert len(servo_cmds) > 0
+    assert servo_cmds[-1][1] == 170  # S1 down
+    assert servo_cmds[-1][2] == 0    # S2 down
+
+    # 3. Start Person Follower: Arm must immediately move UP at start (S1=93, S2=45)
+    comm.command_log.clear()
+    ok_pf = manager.start_activity("person_follower")
+    assert ok_pf is True
+    servo_cmds = [cmd for cmd in comm.command_log if cmd[0] == "SERVO"]
+    assert len(servo_cmds) > 0
+    assert servo_cmds[-1][1] == 93  # S1 stow/up
+    assert servo_cmds[-1][2] == 45  # S2 stow/up
+    assert manager._arm_last_s1 == 93
+    assert manager._arm_last_s2 == 45
+
+    manager.stop_activity()
+
+
 

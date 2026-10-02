@@ -303,6 +303,8 @@ class ActivityManager:
                 "s2_max": self.arm.s2_max,
                 "s2_stow": self.arm.s2_stow,
                 "s2_down": self.arm.s2_down,
+                "s3_open": getattr(self.arm, "s3_open", 170),
+                "s3_close": getattr(self.arm, "s3_close", 40),
                 "cur_s1": self.arm.cur_s1,
                 "cur_s2": self.arm.cur_s2,
                 "cur_s3": self.arm.cur_s3,
@@ -326,6 +328,8 @@ class ActivityManager:
                     "s2_max": int(s2.get("max_angle", 45)),
                     "s2_stow": int(s2.get("up_angle", s2.get("stow_angle", 45))),
                     "s2_down": int(s2.get("down_angle", 0)),
+                    "s3_open": int(s3.get("open_angle", 170)),
+                    "s3_close": int(s3.get("close_angle", 40)),
                     "cur_s1": self._arm_last_s1 or int(s1.get("stow_angle", 93)),
                     "cur_s2": self._arm_last_s2 or int(s2.get("stow_angle", 45)),
                     "cur_s3": int(s3.get("open_angle", 170)),
@@ -335,7 +339,94 @@ class ActivityManager:
         return {
             "s1_min": 60, "s1_max": 170, "s1_stow": 93, "s1_down": 170,
             "s2_min": 0, "s2_max": 45, "s2_stow": 45, "s2_down": 0,
+            "s3_open": 170, "s3_close": 40,
             "cur_s1": self._arm_last_s1 or 93, "cur_s2": self._arm_last_s2 or 45, "cur_s3": 170,
+        }
+
+    def set_arm_down(self, open_gripper: bool = True, force: bool = False):
+        """Moves servo arm into lowered ground pick reach pose (S1=down, S2=down).
+
+        Used when starting and searching for objects or colors to prepare for ground grasping.
+        """
+        limits = self._get_arm_limits()
+        s1_down = limits["s1_down"]
+        s2_down = limits["s2_down"]
+        s3 = limits.get("s3_open", 170) if open_gripper else limits.get("cur_s3", 170)
+
+        if not force and self._arm_last_s1 == s1_down and self._arm_last_s2 == s2_down:
+            return
+
+        if self.arm:
+            try:
+                self.arm.cur_s1 = s1_down
+                self.arm.cur_s2 = s2_down
+                if open_gripper:
+                    self.arm.cur_s3 = s3
+                if hasattr(self.arm, "comm") and self.arm.comm:
+                    self.arm.comm.send_servos(s1_down, s2_down, s3)
+                if hasattr(self.arm, "_persist_state"):
+                    self.arm._persist_state()
+            except Exception as e:
+                print(f"[Activities] Error setting arm down: {e}")
+        elif self.comm:
+            try:
+                self.comm.send_servos(s1_down, s2_down, s3)
+            except Exception as e:
+                print(f"[Activities] Error sending servos down: {e}")
+
+        self._arm_last_s1 = s1_down
+        self._arm_last_s2 = s2_down
+        self._arm_last_update_time = time.time()
+        self.telemetry["arm_ik"] = {
+            "s1": s1_down,
+            "s2": s2_down,
+            "error_y": 0,
+            "vertical_status": "SETTLED_AT_LIMIT",
+            "active": True,
+            "status": "SETTLED",
+            "latency_ms": 0.0,
+        }
+
+    def set_arm_up(self, force: bool = False):
+        """Moves servo arm into upright stowed pose (S1=stow, S2=stow).
+
+        Used when starting and searching during human following to maintain walking clearance.
+        """
+        limits = self._get_arm_limits()
+        s1_stow = limits["s1_stow"]
+        s2_stow = limits["s2_stow"]
+        s3 = limits.get("cur_s3", 170)
+
+        if not force and self._arm_last_s1 == s1_stow and self._arm_last_s2 == s2_stow:
+            return
+
+        if self.arm:
+            try:
+                self.arm.cur_s1 = s1_stow
+                self.arm.cur_s2 = s2_stow
+                if hasattr(self.arm, "comm") and self.arm.comm:
+                    self.arm.comm.send_servos(s1_stow, s2_stow, s3)
+                if hasattr(self.arm, "_persist_state"):
+                    self.arm._persist_state()
+            except Exception as e:
+                print(f"[Activities] Error setting arm up: {e}")
+        elif self.comm:
+            try:
+                self.comm.send_servos(s1_stow, s2_stow, s3)
+            except Exception as e:
+                print(f"[Activities] Error sending servos up: {e}")
+
+        self._arm_last_s1 = s1_stow
+        self._arm_last_s2 = s2_stow
+        self._arm_last_update_time = time.time()
+        self.telemetry["arm_ik"] = {
+            "s1": s1_stow,
+            "s2": s2_stow,
+            "error_y": 0,
+            "vertical_status": "STOWED",
+            "active": True,
+            "status": "SETTLED",
+            "latency_ms": 0.0,
         }
 
     def _track_arm_elevation(self, cy: int, h: int, latency_s: float = 0.05) -> Tuple[int, int]:
@@ -904,6 +995,14 @@ class ActivityManager:
             self.telemetry["status"] = "STARTING"
             self.telemetry["details"] = f"Initializing {clean_name.replace('_', ' ').title()}..."
 
+            # Position servo arm at start:
+            # - Object & color tracking: arm DOWN at start (ready for ground reach/grasp)
+            # - Human following: arm UP at start (stowed upright pose for walking clearance)
+            if clean_name in ("object_tracking", "color_tracking", "color_track_and_classify", "object_sizing"):
+                self.set_arm_down(open_gripper=True, force=True)
+            elif clean_name in ("person_follower", "obstacle_avoidance"):
+                self.set_arm_up(force=True)
+
             # Launch asynchronous perception worker for high-throughput tracking
             if clean_name in ("person_follower", "object_tracking", "color_track_and_classify") and self.camera and self.vision:
                 self._perception_thread = threading.Thread(target=self._perception_worker, daemon=True)
@@ -1043,7 +1142,7 @@ class ActivityManager:
 
     def _activity_loop(self):
         """Background control loop running at ~15-20 Hz."""
-        last_seen_time = time.time()
+        last_seen_time = 0.0
 
         while self.running:
             t0 = time.time()
@@ -1448,6 +1547,7 @@ class ActivityManager:
                 self.telemetry["details"] = "Searching for legs or person in view..."
                 if self.comm:
                     self.comm.send_stop()
+                self.set_arm_up()
 
         return last_seen
 
@@ -1739,6 +1839,7 @@ class ActivityManager:
                 self.telemetry["details"] = f"Searching for {target_color} target in view..."
                 if self.comm:
                     self.comm.send_stop()
+                self.set_arm_down(open_gripper=True)
 
         return last_seen
 
@@ -2037,7 +2138,7 @@ class ActivityManager:
             self._target_dyn_history.clear()
             self._target_is_moving = False
             lost_duration = now - last_seen
-            if lost_duration > 3.0:
+            if lost_duration > 1.2:
                 self._ot_ema_x = None
                 self._locked_target_center = None
                 self._locked_target_label = None
@@ -2049,6 +2150,7 @@ class ActivityManager:
                 self.telemetry["details"] = f"Searching for '{target_obj}' in view..."
                 if self.comm:
                     self.comm.send_stop()
+                self.set_arm_down(open_gripper=True)
 
         return last_seen
 
@@ -2371,6 +2473,7 @@ class ActivityManager:
                 self.telemetry["details"] = f"Searching for {target_color} objects in view..."
                 if self.comm:
                     self.comm.send_stop()
+                self.set_arm_down(open_gripper=True)
 
         return last_seen
 
@@ -2636,6 +2739,7 @@ class ActivityManager:
                 self.telemetry["details"] = f"Searching for {target_str} to size..."
                 if self.comm:
                     self.comm.send_stop()
+                self.set_arm_down(open_gripper=True)
 
         return last_seen
 
