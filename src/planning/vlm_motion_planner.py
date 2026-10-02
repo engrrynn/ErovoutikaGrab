@@ -27,15 +27,15 @@ DEFAULT_OBJECT_GRASP_PROFILES: Dict[str, Dict[str, Any]] = {
     "spray_bottle": {
         "name": "Green Spray Bottle",
         "aliases": ["spray bottle", "spray_bottle", "cleaning spray", "dispenser", "traffic cone", "cone", "bottle", "vase", "aqua"],
-        "target_distance_cm": 15.0,
-        "standoff_band_cm": (-12.0, 6.0),
+        "target_distance_cm": 13.5,
+        "standoff_band_cm": (-2.5, 1.5),
         "grasp_zone": "waist",
         "ideal_box_width_px": 122,
         "ideal_box_height_px": 250,
         "aspect_ratio": 2.05,
         "clamp_angle_deg": 52,
         "sweet_spot_offset_y": 0.65,
-        "approach_ground_y_px": 440,
+        "approach_ground_y_px": 455,
         "description": "Upright cleaning spray bottle with trigger nozzle. Grasp waist body at 65% height below trigger; clamp firmly at 52°.",
         "shoulder_down_deg": 170,
         "elbow_down_deg": 0,
@@ -45,15 +45,15 @@ DEFAULT_OBJECT_GRASP_PROFILES: Dict[str, Dict[str, Any]] = {
     "bottle": {
         "name": "Standard Beverage Bottle",
         "aliases": ["bottle", "water bottle", "flask", "can", "cup"],
-        "target_distance_cm": 15.0,
-        "standoff_band_cm": (-12.0, 6.0),
+        "target_distance_cm": 13.5,
+        "standoff_band_cm": (-2.5, 1.5),
         "grasp_zone": "body",
         "ideal_box_width_px": 110,
         "ideal_box_height_px": 200,
         "aspect_ratio": 1.8,
         "clamp_angle_deg": 48,
         "sweet_spot_offset_y": 0.55,
-        "approach_ground_y_px": 430,
+        "approach_ground_y_px": 450,
         "description": "Cylindrical beverage container. Grasp body mid-section with 48° clamp.",
         "shoulder_down_deg": 170,
         "elbow_down_deg": 0,
@@ -708,8 +708,8 @@ class VLMMotionPlanner:
         # Check trained object affordance profile
         profile = self.get_object_grasp_profile(category)
         effective_target_dist = target_dist_cm
-        standoff_min = -12.0
-        standoff_max = 6.0
+        standoff_min = -2.5
+        standoff_max = 1.5
         if profile and "target_distance_cm" in profile:
             if target_dist_cm is None or abs(target_dist_cm - 30.0) < 1.0 or abs(target_dist_cm - 40.0) < 1.0 or abs(target_dist_cm - 14.0) < 1.0 or target_dist_cm <= 0:
                 effective_target_dist = float(profile["target_distance_cm"])

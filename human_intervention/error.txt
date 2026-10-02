@@ -267,22 +267,12 @@ the vlm should be implemented always why is there a plan with vlm and execute pl
              - Executed arm grasp macro: gripper lowered, clamped bottle waist at 55 deg, and lifted off the floor into upright stow pose (after_close_pick.jpg).
              - Targeted tests verified in 0.23s without running full test suites to conserve tokens and minimize turnaround latency.
 
-        when searching for object and color the servo arm pose should be down at start and when human following it should be up at start
-        - RESOLUTION:
-          1. Pose Helpers & Limit Synchronizations:
-             - Added `set_arm_down(open_gripper=True, force=False)` and `set_arm_up(force=False)` to `src/activities/activity_manager.py`.
-             - Calibrated `_get_arm_limits()` to supply `s3_open` (170°) and `s3_close` (40°) across hardware, config YAML, and fallback paths.
-          2. Activity Initialization (At Start):
-             - In `start_activity()`:
-               * For object and color activities (`object_tracking`, `color_tracking`, `color_track_and_classify`, `object_sizing`): immediately positions arm to DOWN pose (S1=170°, S2=0°, S3=170° pre-opened) upon activity start.
-               * For human following (`person_follower`) and obstacle avoidance: immediately positions arm to UP pose (stowed S1=93°, S2=45°) upon activity start to maximize walking ground clearance.
-          3. Dynamic Searching State (When Searching):
-             - In `_activity_loop`, initialized `last_seen_time = 0.0` so activities enter `SEARCHING` state immediately upon starting before the first target detection.
-             - When searching (target lost or not yet acquired):
-               * `_step_color_tracking`, `_step_object_tracking`, `_step_color_track_and_classify`, `_step_object_sizing`: continuously enforces arm pose DOWN (`set_arm_down(open_gripper=True)`).
-               * `_step_person_follower`: continuously enforces arm pose UP (`set_arm_up()`).
-          4. Verification:
-             - Verified via live API telemetry:
-               * Starting `object_tracking` drives Arduino servos to `(170, 0, 170)` (DOWN).
-               * Starting `person_follower` drives Arduino servos to `(93, 45, 170)` (UP).
-             - Added unit test `test_arm_pose_at_start_and_search` in `tests/test_activities.py` (passed in 0.51s).
+
+
+
+
+there is a 32 - 35 cm distance upon settling of the servo arm when down, abd fix that the servo arm should go down pose first during object and color tracking before detecting 
+
+
+
+when idle the system should check if the gripper is closed, it should go back to open when idle

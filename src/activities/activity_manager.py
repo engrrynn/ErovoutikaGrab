@@ -109,6 +109,8 @@ class ActivityManager:
         self._arm_holding: bool = False
         self._ik_settled_frames: int = 0
         self._is_grabbing: bool = False
+        self._arm_settling: bool = False
+        self._arm_settle_until: float = 0.0
 
         # Obstacle avoidance Arm IK Environmental Scan state
         self._oa_scan_state: str = "IDLE"
@@ -134,7 +136,9 @@ class ActivityManager:
             "person_target_height_ratio": 0.45,  # Person bbox height ~45% of image height (fallback)
             "person_target_ground_y": 0.83,     # Person foot contact point ~83% of image height
             "person_ground_tolerance": 0.06,    # Depth tolerance band (+/- 6%)
-            "target_distance_cm": 55.0,         # Calibrated standoff distance (cm)
+            "target_distance_cm": 55.0,         # Calibrated standoff distance for person follower (cm)
+            "object_target_distance_cm": 13.5,  # Calibrated standoff distance for object tracking (cm)
+            "color_target_distance_cm": 13.5,   # Calibrated standoff distance for color tracking (cm)
             "object_target_height_ratio": 0.35,  # Object bbox height ~35% of image height
             "sizing_target_height_ratio": 0.35,  # Ideal inspection height ratio
             "color_target_area_ratio": 0.08,    # Color blob area ~8% of image area
@@ -429,13 +433,14 @@ class ActivityManager:
             "latency_ms": 0.0,
         }
 
-    def _track_arm_elevation(self, cy: int, h: int, latency_s: float = 0.05) -> Tuple[int, int]:
+    def _track_arm_elevation(self, cy: int, h: int, latency_s: float = 0.05, ymax: Optional[int] = None) -> Tuple[int, int]:
         """Decisive, non-oscillating inverse-kinematics arm elevation tracking to vertically center target in camera view.
 
         Features:
         - Rigidly locks servos in place once within the sweet spot deadband (holding state) with hysteresis.
         - Synchronizes with the calibrated grasp sweet spot (cy - sweet_spot_y).
         - Executes decisive quantized steps (min. 3 degrees) instead of 1-degree micro-hunting.
+        - For ground pick activities (object/color tracking), holds arm DOWN in pick pose and verifies ground grasp envelope (ymax >= 445px).
         """
         now = time.time()
         limits = self._get_arm_limits()
@@ -446,6 +451,27 @@ class ActivityManager:
         cur_s1 = self._arm_last_s1 or limits["cur_s1"]
         cur_s2 = self._arm_last_s2 or limits["cur_s2"]
         cur_s3 = limits["cur_s3"]
+
+        # For ground pick activities (object/color tracking), the arm is already deployed DOWN in pick pose.
+        # It must NOT pitch up towards horizon (sy=247), which falsely settles at 32-35cm distance!
+        is_ground_activity = self.active_activity in ("object_tracking", "color_tracking", "color_track_and_classify", "object_sizing")
+        if is_ground_activity and (cur_s1 >= s1_down - 15 and cur_s2 <= s2_down + 15):
+            check_y = ymax if ymax is not None else cy
+            in_grasp_reach = (check_y >= 445)
+            status = "SETTLED_AT_LIMIT" if in_grasp_reach else "APPROACHING_GROUND"
+            err_y = 0 if in_grasp_reach else max(1, 445 - check_y)
+
+            self._arm_holding = True
+            self.telemetry["arm_ik"] = {
+                "s1": s1_down,
+                "s2": s2_down,
+                "error_y": err_y,
+                "vertical_status": status,
+                "active": True,
+                "status": "SETTLED" if in_grasp_reach else "APPROACHING",
+                "latency_ms": round(latency_s * 1000, 1),
+            }
+            return s1_down, s2_down
 
         # Calibrated vertical sweet spot from vision config / scaling
         _, sy = self._get_sweet_spot(640, h)
@@ -683,7 +709,10 @@ class ActivityManager:
                 })
 
         # Approach or Standoff Stage
-        if dist_err > 8.0:
+        approach_band = 1.5 if target_dist_cm <= 15.0 else 8.0
+        reverse_band = -3.5 if target_dist_cm <= 15.0 else -6.0
+
+        if dist_err > approach_band:
             est_drive_dur = max(0.15, min(1.2, (dist_err / 80.0) * 0.6))
             stages.append({
                 "stage": len(stages) + 1,
@@ -695,7 +724,7 @@ class ActivityManager:
                 "continuous": True,
                 "desc": f"Continuous cruise along planned linkage to target standoff {target_dist_cm:.0f}cm."
             })
-        elif dist_err < -6.0:
+        elif dist_err < reverse_band:
             stages.append({
                 "stage": len(stages) + 1,
                 "name": "REVERSE_CLEAR",
@@ -996,12 +1025,21 @@ class ActivityManager:
             self.telemetry["details"] = f"Initializing {clean_name.replace('_', ' ').title()}..."
 
             # Position servo arm at start:
-            # - Object & color tracking: arm DOWN at start (ready for ground reach/grasp)
+            # - Object & color tracking: arm DOWN pose FIRST before detecting
             # - Human following: arm UP at start (stowed upright pose for walking clearance)
             if clean_name in ("object_tracking", "color_tracking", "color_track_and_classify", "object_sizing"):
+                already_down = (self._arm_last_s1 == 170 and self._arm_last_s2 == 0)
                 self.set_arm_down(open_gripper=True, force=True)
+                settle_dur = 0.2 if already_down else 1.4
+                self._arm_settling = True
+                self._arm_settle_until = time.time() + settle_dur
+                self.telemetry["status"] = "DEPLOYING_ARM"
+                self.telemetry["action"] = "LOWERING_ARM"
+                self.telemetry["details"] = "Lowering servo arm to ground grasp pose before starting detection..."
             elif clean_name in ("person_follower", "obstacle_avoidance"):
                 self.set_arm_up(force=True)
+                self._arm_settling = False
+                self._arm_settle_until = 0.0
 
             # Launch asynchronous perception worker for high-throughput tracking
             if clean_name in ("person_follower", "object_tracking", "color_track_and_classify") and self.camera and self.vision:
@@ -1016,6 +1054,13 @@ class ActivityManager:
     def _perception_worker(self):
         """Asynchronous vision perception worker that runs detection in background to sustain high framerate."""
         while self.running:
+            # Wait for arm to finish deploying to down pose before starting detection
+            if getattr(self, "_arm_settling", False):
+                if time.time() < getattr(self, "_arm_settle_until", 0.0):
+                    time.sleep(0.05)
+                    continue
+                self._arm_settling = False
+
             act = self.active_activity
             if act not in ("person_follower", "object_tracking", "color_track_and_classify"):
                 time.sleep(0.04)
@@ -1067,6 +1112,8 @@ class ActivityManager:
         self._target_is_moving = False
         self._last_cmd_l = 0
         self._last_cmd_r = 0
+        self._arm_settling = False
+        self._arm_settle_until = 0.0
         self._perception_thread = None
         with self._vision_lock:
             self._latest_detections = []
@@ -1145,6 +1192,21 @@ class ActivityManager:
         last_seen_time = 0.0
 
         while self.running:
+            # Wait for arm to finish deploying to down pose before starting detection
+            if getattr(self, "_arm_settling", False):
+                if time.time() < getattr(self, "_arm_settle_until", 0.0):
+                    self.telemetry["status"] = "DEPLOYING_ARM"
+                    self.telemetry["action"] = "LOWERING_ARM"
+                    self.telemetry["details"] = "Lowering servo arm to ground grasp pose before starting detection..."
+                    if self.comm:
+                        try:
+                            self.comm.send_stop()
+                        except Exception:
+                            pass
+                    time.sleep(0.05)
+                    continue
+                self._arm_settling = False
+
             t0 = time.time()
             frame = None
             if self.camera and self.camera.is_opened():
@@ -1669,7 +1731,7 @@ class ActivityManager:
             b_speed = self._get_base_speed()
             f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
-            target_dist = float(self.config.get("color_target_distance_cm", 14.0))
+            target_dist = float(self.config.get("color_target_distance_cm", self.config.get("target_distance_cm", self.config.get("target_dist", 13.5))))
 
             # Evaluate target dynamics (Moving vs Stationary Target)
             is_moving = self._evaluate_target_dynamics(cx, cy, now)
@@ -1749,12 +1811,13 @@ class ActivityManager:
                         area_ratio=area_ratio
                     )
             else:
-                # Fallback if no vlm_planner configured
+                # Fallback if no vlm_planner configured: drive until true grasp reach
+                needs_approach = (dist_cm > (target_dist + 1.5)) and (int(y + bh) < 445)
                 if abs(ex) > deadband_x:
                     pulse_dur = max(0.08, min(0.18, 0.08 + (abs(ex) / float(w // 2)) * 0.10))
                     if ex > 0:
                         action = "TURN_RIGHT"
-                        if area_ratio < target_area_ratio:
+                        if needs_approach:
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
                             left_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             right_pwm = max(b_speed, f_speed - steer_bias * 2)
@@ -1763,16 +1826,16 @@ class ActivityManager:
                             left_pwm, right_pwm = turn_pwm, -turn_pwm
                     else:
                         action = "TURN_LEFT"
-                        if area_ratio < target_area_ratio:
+                        if needs_approach:
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
                             right_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             left_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = -turn_pwm, turn_pwm
-                elif area_ratio < target_area_ratio:
+                elif needs_approach:
                     action = "APPROACH"
-                    pulse_dur = max(0.10, min(0.20, (target_area_ratio - area_ratio) * 1.5))
+                    pulse_dur = max(0.10, min(0.20, (dist_cm - target_dist) / 80.0 * 0.25))
                     left_pwm, right_pwm = f_speed, f_speed
                     continuous_drive = True
                 else:
@@ -1781,20 +1844,20 @@ class ActivityManager:
 
             # Arm elevation tracking (smooth hardware interpolation)
             dt_lat = max(0.04, time.time() - now)
-            self._track_arm_elevation(cy, h, latency_s=dt_lat)
+            self._track_arm_elevation(cy, h, latency_s=dt_lat, ymax=int(y + bh))
 
             # Settle & Autonomous Grab Trigger:
             # If target is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 2.0) or (dist_cm <= 15.5) or (int(y + bh) >= 445)
+            is_near = (dist_cm <= target_dist + 1.5) or (int(y + bh) >= 445)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")
             is_vlm_aligned = (vlm_action == "ALIGNED_GRASP")
             vlm_clamp_angle = (vplan.get("arm_plan") or {}).get("calibrated_angles", {}).get("grip_target")
 
-            if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
+            if (is_x_centered and is_y_centered and is_near and not is_moving) or (is_vlm_aligned and is_near):
                 self._ik_settled_frames += (2 if is_vlm_aligned else 1)
                 if self._ik_settled_frames >= 4 and not self._is_grabbing:
                     self._trigger_autonomous_grab(target_color, clamp_angle=vlm_clamp_angle)
@@ -1977,7 +2040,7 @@ class ActivityManager:
             b_speed = self._get_base_speed()
             f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
-            target_dist = float(self.config.get("object_target_distance_cm", self.config.get("target_distance_cm", 14.0)))
+            target_dist = float(self.config.get("object_target_distance_cm", self.config.get("target_distance_cm", self.config.get("target_dist", 13.5))))
 
             # Evaluate target dynamics (Moving vs Stationary Target)
             is_moving = self._evaluate_target_dynamics(px_center, target_cy, now)
@@ -2057,12 +2120,13 @@ class ActivityManager:
                         area_ratio=height_ratio
                     )
             else:
-                # Fallback if no vlm_planner configured
+                # Fallback if no vlm_planner configured: drive until true grasp reach
+                needs_approach = (dist_cm > (target_dist + 1.5)) and (ymax < 445)
                 if abs(ex) > deadband_x:
                     pulse_dur = max(0.08, min(0.18, 0.08 + (abs(ex) / float(w // 2)) * 0.10))
                     if ex > 0:
                         action = "TURN_RIGHT"
-                        if height_ratio < (target_h - h_tol):
+                        if needs_approach:
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
                             left_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             right_pwm = max(b_speed, f_speed - steer_bias * 2)
@@ -2071,19 +2135,19 @@ class ActivityManager:
                             left_pwm, right_pwm = turn_pwm, -turn_pwm
                     else:
                         action = "TURN_LEFT"
-                        if height_ratio < (target_h - h_tol):
+                        if needs_approach:
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
                             right_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             left_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = -turn_pwm, turn_pwm
-                elif height_ratio < (target_h - h_tol):
+                elif needs_approach:
                     action = "APPROACH"
-                    pulse_dur = max(0.10, min(0.20, (target_h - height_ratio) * 1.5))
+                    pulse_dur = max(0.10, min(0.20, (dist_cm - target_dist) / 80.0 * 0.25))
                     left_pwm, right_pwm = f_speed, f_speed
                     continuous_drive = True
-                elif height_ratio > (target_h + h_tol):
+                elif dist_cm < (target_dist - 3.0) and ymax > 465:
                     action = "BACK_UP"
                     pulse_dur = 0.10
                     left_pwm, right_pwm = -f_speed, -f_speed
@@ -2093,20 +2157,20 @@ class ActivityManager:
 
             # Arm elevation tracking (smooth hardware interpolation)
             dt_lat = max(0.04, time.time() - now)
-            self._track_arm_elevation(target_cy, h, latency_s=dt_lat)
+            self._track_arm_elevation(target_cy, h, latency_s=dt_lat, ymax=ymax)
 
             # Settle & Autonomous Grab Trigger:
             # If target object is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 2.0) or (dist_cm <= 15.5) or (ymax >= 445)
+            is_near = (dist_cm <= target_dist + 1.5) or (ymax >= 445)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")
             is_vlm_aligned = (vlm_action == "ALIGNED_GRASP")
             vlm_clamp_angle = (vplan.get("arm_plan") or {}).get("calibrated_angles", {}).get("grip_target")
 
-            if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
+            if (is_x_centered and is_y_centered and is_near and not is_moving) or (is_vlm_aligned and is_near):
                 self._ik_settled_frames += (2 if is_vlm_aligned else 1)
                 if self._ik_settled_frames >= 4 and not self._is_grabbing:
                     self._trigger_autonomous_grab(cat_name, clamp_angle=vlm_clamp_angle)
@@ -2302,7 +2366,7 @@ class ActivityManager:
             b_speed = self._get_base_speed()
             f_speed = max(b_speed, int(self.config.get("follow_speed", 235)))
             turn_pwm = self._compute_diminishing_turn_pwm(ex, w)
-            target_dist = float(self.config.get("color_target_distance_cm", 14.0))
+            target_dist = float(self.config.get("color_target_distance_cm", self.config.get("target_distance_cm", self.config.get("target_dist", 13.5))))
 
             # Evaluate target dynamics (Moving vs Stationary Target)
             is_moving = self._evaluate_target_dynamics(cx, cy, now)
@@ -2382,12 +2446,13 @@ class ActivityManager:
                         area_ratio=area_ratio
                     )
             else:
-                # Fallback if no vlm_planner configured
+                # Fallback if no vlm_planner configured: drive until true grasp reach
+                needs_approach = (dist_cm > (target_dist + 1.5)) and (int(y + bh) < 445)
                 if abs(ex) > deadband_x:
                     pulse_dur = max(0.08, min(0.18, 0.08 + (abs(ex) / float(w // 2)) * 0.10))
                     if ex > 0:
                         action = "TURN_RIGHT"
-                        if area_ratio < target_area_ratio:
+                        if needs_approach:
                             steer_bias = int(min(25, (ex / float(w // 2)) * 25))
                             left_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             right_pwm = max(b_speed, f_speed - steer_bias * 2)
@@ -2396,16 +2461,16 @@ class ActivityManager:
                             left_pwm, right_pwm = turn_pwm, -turn_pwm
                     else:
                         action = "TURN_LEFT"
-                        if area_ratio < target_area_ratio:
+                        if needs_approach:
                             steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
                             right_pwm = min(255, max(t_speed, f_speed + steer_bias))
                             left_pwm = max(b_speed, f_speed - steer_bias * 2)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = -turn_pwm, turn_pwm
-                elif area_ratio < target_area_ratio:
+                elif needs_approach:
                     action = "APPROACH"
-                    pulse_dur = max(0.10, min(0.20, (target_area_ratio - area_ratio) * 1.5))
+                    pulse_dur = max(0.10, min(0.20, (dist_cm - target_dist) / 80.0 * 0.25))
                     left_pwm, right_pwm = f_speed, f_speed
                     continuous_drive = True
                 else:
@@ -2414,20 +2479,20 @@ class ActivityManager:
 
             # Arm elevation tracking (smooth hardware interpolation)
             dt_lat = max(0.04, time.time() - now)
-            self._track_arm_elevation(cy, h, latency_s=dt_lat)
+            self._track_arm_elevation(cy, h, latency_s=dt_lat, ymax=int(y + bh))
 
             # Settle & Autonomous Grab Trigger:
             # If target is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 2.0) or (dist_cm <= 15.5) or (int(y + bh) >= 445)
+            is_near = (dist_cm <= target_dist + 1.5) or (int(y + bh) >= 445)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")
             is_vlm_aligned = (vlm_action == "ALIGNED_GRASP")
             vlm_clamp_angle = (vplan.get("arm_plan") or {}).get("calibrated_angles", {}).get("grip_target")
 
-            if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
+            if (is_x_centered and is_y_centered and is_near and not is_moving) or (is_vlm_aligned and is_near):
                 self._ik_settled_frames += (2 if is_vlm_aligned else 1)
                 if self._ik_settled_frames >= 4 and not self._is_grabbing:
                     self._trigger_autonomous_grab(full_title, clamp_angle=vlm_clamp_angle)
@@ -2707,7 +2772,7 @@ class ActivityManager:
 
             # Arm elevation tracking (IK-like pitch up/down within servo bounds synced to latency)
             dt_lat = max(0.04, time.time() - now)
-            self._track_arm_elevation(target_cy, h, latency_s=dt_lat)
+            self._track_arm_elevation(target_cy, h, latency_s=dt_lat, ymax=ymax)
 
             is_motion = self.config.get("motion_enabled", True)
             if not is_motion:
