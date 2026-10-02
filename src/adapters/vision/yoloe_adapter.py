@@ -46,6 +46,11 @@ DEFAULT_TARGET_CLASSES = [
 # here (or matching via substring) get marked pickable=True.
 DEFAULT_PICKABLE_CLASSES = [
     "bottle",
+    "spray bottle",
+    "spray_bottle",
+    "traffic cone",
+    "cone",
+    "dispenser",
     "can",
     "cup",
     "box",

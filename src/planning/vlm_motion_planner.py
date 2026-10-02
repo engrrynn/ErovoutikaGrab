@@ -22,6 +22,46 @@ from src.core.events import DetectionResult
 
 logger = logging.getLogger(__name__)
 
+# Calibrated Object Grasp Affordance Profiles & Sweet Spot Kinematics
+DEFAULT_OBJECT_GRASP_PROFILES: Dict[str, Dict[str, Any]] = {
+    "spray_bottle": {
+        "name": "Green Spray Bottle",
+        "aliases": ["spray bottle", "spray_bottle", "cleaning spray", "dispenser", "traffic cone", "cone", "bottle"],
+        "target_distance_cm": 15.0,
+        "standoff_band_cm": (-12.0, 6.0),
+        "grasp_zone": "waist",
+        "ideal_box_width_px": 122,
+        "ideal_box_height_px": 250,
+        "aspect_ratio": 2.05,
+        "clamp_angle_deg": 52,
+        "sweet_spot_offset_y": 0.65,
+        "approach_ground_y_px": 440,
+        "description": "Upright cleaning spray bottle with trigger nozzle. Grasp waist body at 65% height below trigger; clamp firmly at 52°.",
+        "shoulder_down_deg": 170,
+        "elbow_down_deg": 0,
+        "stow_shoulder_deg": 93,
+        "stow_elbow_deg": 45,
+    },
+    "bottle": {
+        "name": "Standard Beverage Bottle",
+        "aliases": ["bottle", "water bottle", "flask", "can", "cup"],
+        "target_distance_cm": 15.0,
+        "standoff_band_cm": (-12.0, 6.0),
+        "grasp_zone": "body",
+        "ideal_box_width_px": 110,
+        "ideal_box_height_px": 200,
+        "aspect_ratio": 1.8,
+        "clamp_angle_deg": 48,
+        "sweet_spot_offset_y": 0.55,
+        "approach_ground_y_px": 430,
+        "description": "Cylindrical beverage container. Grasp body mid-section with 48° clamp.",
+        "shoulder_down_deg": 170,
+        "elbow_down_deg": 0,
+        "stow_shoulder_deg": 93,
+        "stow_elbow_deg": 45,
+    },
+}
+
 
 @dataclass
 class VLMMotionPlan:
@@ -165,6 +205,70 @@ class VLMMotionPlanner:
         self.recent_history: List[Dict[str, Any]] = []
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         self.adaptation_log_path = os.path.join(base_dir, "logs", "vlm_adaptation_log.jsonl")
+        self.trained_objects_path = os.path.join(base_dir, "data", "vlm_trained_objects.json")
+        self.trained_objects: Dict[str, Dict[str, Any]] = dict(DEFAULT_OBJECT_GRASP_PROFILES)
+        self._load_trained_objects()
+
+    def _load_trained_objects(self):
+        """Loads trained object grasp profiles from persistent disk registry."""
+        if os.path.exists(self.trained_objects_path):
+            try:
+                with open(self.trained_objects_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.trained_objects.update(data)
+            except Exception as e:
+                logger.warning(f"Failed to load trained objects from {self.trained_objects_path}: {e}")
+
+    def get_object_grasp_profile(self, category: str) -> Optional[Dict[str, Any]]:
+        """Matches a detected category or alias against registered trained grasp profiles."""
+        if not category:
+            return None
+        cat_clean = category.lower().strip()
+        cat_words = set(cat_clean.split())
+        with self._lock:
+            # 1. Exact key match
+            if cat_clean in self.trained_objects:
+                return self.trained_objects[cat_clean]
+            # 2. Normalized key match
+            cat_norm = cat_clean.replace(" ", "_")
+            if cat_norm in self.trained_objects:
+                return self.trained_objects[cat_norm]
+            # 3. Alias match (exact alias or whole-word match)
+            for p_key, prof in self.trained_objects.items():
+                aliases = [a.lower().strip() for a in prof.get("aliases", [])]
+                if cat_clean in aliases:
+                    return prof
+                for alias in aliases:
+                    if alias == cat_clean:
+                        return prof
+                    # Multi-word match: e.g. "spray bottle" matches "green spray bottle"
+                    if len(alias) >= 4 and len(cat_clean) >= 4:
+                        if alias in cat_clean and (len(alias.split()) > 1 or alias in cat_words):
+                            return prof
+                        if cat_clean in alias and (len(cat_clean.split()) > 1 or cat_clean in alias.split()):
+                            return prof
+        return None
+
+    def train_object_grasp(self, name: str, profile_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Registers a new trained object grasp profile and persists to disk registry."""
+        with self._lock:
+            key = name.lower().strip().replace(" ", "_")
+            profile_data.setdefault("name", name)
+            profile_data.setdefault("trained_at", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+            self.trained_objects[key] = profile_data
+            try:
+                os.makedirs(os.path.dirname(self.trained_objects_path), exist_ok=True)
+                with open(self.trained_objects_path, "w", encoding="utf-8") as f:
+                    json.dump(self.trained_objects, f, indent=2)
+            except Exception as e:
+                logger.warning(f"Failed to persist trained objects to {self.trained_objects_path}: {e}")
+            return self.trained_objects[key]
+
+    def get_trained_objects(self) -> Dict[str, Any]:
+        """Returns all registered trained object grasp profiles."""
+        with self._lock:
+            return dict(self.trained_objects)
 
     def _parse_servos_cfg(self, servos_cfg: dict):
         """Extracts calibrated servo angles from nested YAML or flat dictionary."""
@@ -406,25 +510,48 @@ class VLMMotionPlanner:
         box_w: int,
         sweet_w: int,
         area_ratio: float,
-        is_centered: bool
+        is_centered: bool,
+        bbox: Optional[Tuple[int, int, int, int]] = None
     ) -> Dict[str, Any]:
-        """Plans servo arm trajectory and adaptive grip angle based on robot config calibration."""
+        """Plans servo arm trajectory and adaptive grip angle based on robot config calibration and trained object affordance profiles."""
         s3_min_bound = min(self.s3_min, self.s3_max)
         s3_max_bound = max(self.s3_min, self.s3_max)
 
-        # Compute adaptive grip angle based on object width relative to sweet spot width
-        norm_w = min(1.0, max(0.05, float(box_w) / max(1, sweet_w)))
-        gripper_span = self.s3_open - self.s3_close
-        adaptive_close = int(self.s3_close + gripper_span * (norm_w * 0.18))
-        adaptive_close = max(s3_min_bound, min(s3_max_bound, adaptive_close))
+        # Retrieve trained object profile if available
+        profile = self.get_object_grasp_profile(category)
+        if profile and "clamp_angle_deg" in profile:
+            calibrated_clamp = int(profile["clamp_angle_deg"])
+            norm_w = min(1.0, max(0.05, float(box_w) / max(1, sweet_w)))
+            adaptive_close = int(calibrated_clamp + (norm_w - 0.5) * 6)
+            adaptive_close = max(s3_min_bound, min(s3_max_bound, adaptive_close))
+            grasp_zone = profile.get("grasp_zone", "waist")
+            obj_desc = profile.get("description", f"Trained {category} waist grasp")
+        else:
+            norm_w = min(1.0, max(0.05, float(box_w) / max(1, sweet_w)))
+            gripper_span = self.s3_open - self.s3_close
+            adaptive_close = int(self.s3_close + gripper_span * (norm_w * 0.18))
+            adaptive_close = max(s3_min_bound, min(s3_max_bound, adaptive_close))
+            grasp_zone = "center"
+            obj_desc = f"Standard {category} center grasp"
+
+        s1_down_angle = self.s1_down
+        s2_down_angle = self.s2_down
+
+        grasp_point = None
+        if bbox is not None and len(bbox) == 4:
+            ymin, xmin, ymax, xmax = bbox
+            offset_ratio = profile.get("sweet_spot_offset_y", 0.55) if profile else 0.55
+            grasp_y = int(ymin + (ymax - ymin) * offset_ratio)
+            grasp_x = int((xmin + xmax) // 2)
+            grasp_point = [grasp_x, grasp_y]
 
         calibrated_angles = {
             "s1_stow": self.s1_stow,
-            "s1_down": self.s1_down,
+            "s1_down": s1_down_angle,
             "s1_min": self.s1_min,
             "s1_max": self.s1_max,
             "s2_stow": self.s2_stow,
-            "s2_down": self.s2_down,
+            "s2_down": s2_down_angle,
             "s2_min": self.s2_min,
             "s2_max": self.s2_max,
             "s3_open": self.s3_open,
@@ -433,7 +560,10 @@ class VLMMotionPlanner:
             "s3_max": self.s3_max,
             "grip_target": adaptive_close,
             "step_deg": self.step_deg,
-            "step_delay_s": self.step_delay_s
+            "step_delay_s": self.step_delay_s,
+            "grasp_zone": grasp_zone,
+            "grasp_point": grasp_point,
+            "profile_matched": bool(profile)
         }
 
         if action == "ALIGNED_GRASP":
@@ -450,20 +580,20 @@ class VLMMotionPlanner:
                 {
                     "stage": 2,
                     "name": "LOWER_TO_TARGET",
-                    "s1": self.s1_down,
-                    "s2": self.s2_down,
+                    "s1": s1_down_angle,
+                    "s2": s2_down_angle,
                     "s3": self.s3_open,
                     "duration_s": 1.0,
-                    "description": f"Lower shoulder to {self.s1_down}° and elbow to {self.s2_down}° into ground pick zone."
+                    "description": f"Lower shoulder to {s1_down_angle}° and elbow to {s2_down_angle}° into ground pick zone."
                 },
                 {
                     "stage": 3,
                     "name": "CLAMP_GRIPPER",
-                    "s1": self.s1_down,
-                    "s2": self.s2_down,
+                    "s1": s1_down_angle,
+                    "s2": s2_down_angle,
                     "s3": adaptive_close,
                     "duration_s": 0.7,
-                    "description": f"Firmly clamp {category} with gripper at {adaptive_close}° (calibrated close {self.s3_close}°)."
+                    "description": f"Firmly clamp {category} {grasp_zone} with gripper at {adaptive_close}° ({obj_desc})."
                 },
                 {
                     "stage": 4,
@@ -479,9 +609,12 @@ class VLMMotionPlanner:
                 "arm_action": "EXECUTE_GRAB",
                 "grasp_readiness": "READY",
                 "calibrated_angles": calibrated_angles,
+                "profile_matched": bool(profile),
+                "grasp_zone": grasp_zone,
+                "grasp_point": grasp_point,
                 "trajectory": trajectory,
                 "total_duration_s": round(sum(s["duration_s"] for s in trajectory), 2),
-                "summary": f"Arm ready to grasp {category} using calibrated angles (S1:{self.s1_down}°, S2:{self.s2_down}°, S3:{adaptive_close}°)."
+                "summary": f"Arm ready to grasp {category} ({grasp_zone}) using calibrated angles (S1:{s1_down_angle}°, S2:{s2_down_angle}°, S3:{adaptive_close}°)."
             }
 
         elif action in ("DRIVE_FORWARD", "NUDGE_FORWARD"):
@@ -553,6 +686,7 @@ class VLMMotionPlanner:
         sw = rest[0] if len(rest) > 0 else 196
         sh = rest[1] if len(rest) > 1 else 157
         box_w = max(1, xmax - xmin)
+        bbox = (ymin, xmin, ymax, xmax)
 
         target_info = {
             "category": category,
@@ -571,17 +705,28 @@ class VLMMotionPlanner:
         align_status = "CENTERED" if is_centered else ("NEEDS_RIGHT" if dx > 0 else "NEEDS_LEFT")
         movement_mode = "SMOOTH_PULSE" if target_is_moving else "SMOOTH_FAST"
 
+        # Check trained object affordance profile
+        profile = self.get_object_grasp_profile(category)
+        effective_target_dist = target_dist_cm
+        standoff_min = -12.0
+        standoff_max = 6.0
+        if profile and "target_distance_cm" in profile:
+            if target_dist_cm is None or abs(target_dist_cm - 30.0) < 1.0 or target_dist_cm <= 0:
+                effective_target_dist = float(profile["target_distance_cm"])
+            if "standoff_band_cm" in profile:
+                standoff_min, standoff_max = profile["standoff_band_cm"]
+
         # ------------------------------------------------------------------
         # BRANCH 1: PHYSICAL DISTANCE PATH PLANNING (When distance is measured)
         # ------------------------------------------------------------------
-        if dist_cm is not None and target_dist_cm is not None and dist_cm > 0:
-            dist_error = dist_cm - target_dist_cm
+        if dist_cm is not None and effective_target_dist is not None and dist_cm > 0:
+            dist_error = dist_cm - effective_target_dist
 
             # Scenario 1A: Truly over-extended dangerously close under robot bumper (<12cm from standoff)
-            if dist_error < -12.0:
+            if dist_error < standoff_min:
                 damping = 0.85
                 adjusted_pwm = max(self.base_speed, max(self.min_overcoming_pwm, min(self.max_speed, round(self.base_speed * damping))))
-                arm_plan = self._compute_arm_plan("NUDGE_BACK", category, box_w, sw, area_ratio, is_centered)
+                arm_plan = self._compute_arm_plan("NUDGE_BACK", category, box_w, sw, area_ratio, is_centered, bbox=bbox)
                 return VLMMotionPlan(
                     action="NUDGE_BACK",
                     recommended_pwm=adjusted_pwm,
@@ -599,7 +744,7 @@ class VLMMotionPlanner:
                     is_overextended=True,
                     continuous_drive=False,
                     distance_cm=dist_cm,
-                    target_dist_cm=target_dist_cm,
+                    target_dist_cm=effective_target_dist,
                     horizontal_error_px=dx,
                     area_ratio=area_ratio,
                     target_info=target_info,
@@ -611,10 +756,10 @@ class VLMMotionPlanner:
                     source="VLM_KINEMATIC"
                 )
 
-            # Scenario 1B: Standoff Goal Reached & Graspable Sweet-Spot Band (-12cm to +6cm)
-            if -12.0 <= dist_error <= 6.0:
+            # Scenario 1B: Standoff Goal Reached & Graspable Sweet-Spot Band (standoff_min to standoff_max)
+            if standoff_min <= dist_error <= standoff_max:
                 action_name = "ALIGNED_GRASP" if is_centered else "ALIGNED_HOLD"
-                arm_plan = self._compute_arm_plan(action_name, category, box_w, sw, area_ratio, is_centered)
+                arm_plan = self._compute_arm_plan(action_name, category, box_w, sw, area_ratio, is_centered, bbox=bbox)
                 return VLMMotionPlan(
                     action=action_name,
                     recommended_pwm=0,
@@ -632,13 +777,13 @@ class VLMMotionPlanner:
                     is_overextended=False,
                     continuous_drive=False,
                     distance_cm=dist_cm,
-                    target_dist_cm=target_dist_cm,
+                    target_dist_cm=effective_target_dist,
                     horizontal_error_px=dx,
                     area_ratio=area_ratio,
                     target_info=target_info,
                     arm_plan=arm_plan,
                     rationale=(
-                        f"Target in calibrated grasp zone: Current {dist_cm:.1f}cm (target {target_dist_cm:.1f}cm, dx={dx:+d}px). "
+                        f"Target in calibrated grasp zone: Current {dist_cm:.1f}cm (target {effective_target_dist:.1f}cm, dx={dx:+d}px). "
                         f"Arm IK settled in sweet spot, ready for decisive grasp."
                     ),
                     source="VLM_KINEMATIC"
@@ -766,8 +911,10 @@ class VLMMotionPlanner:
         # ------------------------------------------------------------------
         # Scenario 1: Already inside sweet-spot zone (Ready for Servo Arm Grasp)
         if is_centered and (0.85 <= area_ratio <= 1.18):
-            arm_plan = self._compute_arm_plan("ALIGNED_GRASP", category, box_w, sw, area_ratio, is_centered)
+            arm_plan = self._compute_arm_plan("ALIGNED_GRASP", category, box_w, sw, area_ratio, is_centered, bbox=bbox)
             grip_target = arm_plan["calibrated_angles"]["grip_target"]
+            s1_down_angle = arm_plan["calibrated_angles"].get("s1_down", self.s1_down)
+            s2_down_angle = arm_plan["calibrated_angles"].get("s2_down", self.s2_down)
             return VLMMotionPlan(
                 action="ALIGNED_GRASP",
                 recommended_pwm=0,
@@ -790,7 +937,7 @@ class VLMMotionPlanner:
                 arm_plan=arm_plan,
                 rationale=(
                     f"Target {category} is fully aligned in X (dx={dx:+d}px) and area ratio is {area_ratio*100:.1f}%. "
-                    f"Servo arm grab planned per robot config: Lower S1({self.s1_down}°) & S2({self.s2_down}°), "
+                    f"Servo arm grab planned per robot config: Lower S1({s1_down_angle}°) & S2({s2_down_angle}°), "
                     f"clamp S3({grip_target}°), and lift to stow (S1:{self.s1_stow}°, S2:{self.s2_stow}°)."
                 ),
                 source="VLM_KINEMATIC"
@@ -933,7 +1080,7 @@ class VLMMotionPlanner:
             damping = max(0.6, 1.0 - (area_ratio - 0.60) * 1.5)
             adjusted_pwm = max(self.base_speed, max(self.min_overcoming_pwm, min(self.max_speed, round(self.base_speed * damping))))
             duration = max(50, min(self.nudge_default_ms, int(self.nudge_default_ms * damping)))
-            arm_plan = self._compute_arm_plan("NUDGE_FORWARD", category, box_w, sw, area_ratio, is_centered)
+            arm_plan = self._compute_arm_plan("NUDGE_FORWARD", category, box_w, sw, area_ratio, is_centered, bbox=bbox)
             dyn_text = "moving target - continuous decelerating track" if target_is_moving else "stationary target - fast smooth braking approach"
             return VLMMotionPlan(
                 action="NUDGE_FORWARD",
@@ -974,15 +1121,30 @@ class VLMMotionPlanner:
         timeout_s: float
     ) -> Optional[VLMMotionPlan]:
         """Queries local Ollama VLM with concise structured context to enrich physical rationale."""
+        prof = self.get_object_grasp_profile(detection.category)
+        prof_info = ""
+        if prof:
+            prof_info = (
+                f"Trained Object Affordance: {prof.get('description', '')}\n"
+                f"Calibrated Grasp Zone: {prof.get('grasp_zone', 'waist')}, Target Standoff: {prof.get('target_distance_cm', 15.0)}cm.\n"
+            )
+
+        grip_tgt = kinematic_baseline.arm_plan.get('calibrated_angles', {}).get('grip_target', self.s3_close)
+        s1_tgt = kinematic_baseline.arm_plan.get('calibrated_angles', {}).get('s1_down', self.s1_down)
+        s2_tgt = kinematic_baseline.arm_plan.get('calibrated_angles', {}).get('s2_down', self.s2_down)
+
         prompt = (
             f"You are the motion and arm manipulation planner for the ErovoutikaGrab robot.\n"
             f"Vision Model: YOLOE. Target: {detection.category} (conf {detection.confidence:.2f}, {detection.material_color}).\n"
+            f"{prof_info}"
+            f"Few-Shot Grasp Training: For cleaning spray bottles, grasp mid-body waist at 65% height to clear trigger head; "
+            f"lower S1 to {s1_tgt}°, S2 to {s2_tgt}°, clamp S3 to {grip_tgt}°, and lift to stow (S1={self.s1_stow}°, S2={self.s2_stow}°).\n"
             f"Metrics: dx={dx:+d}px (Set-point tolerance +/-{self.align_tol_x}px), "
             f"Area Ratio={area_ratio*100:.1f}%, Seg Contour={mask_pts_count} pts.\n"
             f"Chassis Motion: {kinematic_baseline.action}, PWM={kinematic_baseline.recommended_pwm}, Duration={kinematic_baseline.duration_ms}ms.\n"
             f"Servo Arm Plan: Action={kinematic_baseline.arm_plan.get('arm_action', 'HOLD')} "
-            f"(S1={self.s1_stow}°->{self.s1_down}°, S2={self.s2_stow}°->{self.s2_down}°, "
-            f"S3={self.s3_open}°->{kinematic_baseline.arm_plan.get('calibrated_angles', {}).get('grip_target', self.s3_close)}°).\n"
+            f"(S1={self.s1_stow}°->{s1_tgt}°, S2={self.s2_stow}°->{s2_tgt}°, "
+            f"S3={self.s3_open}°->{grip_tgt}°).\n"
             f"Provide a 1-sentence engineering confirmation why this coordinated motion and servo arm grab plan avoids overshoot and ensures secure manipulation."
         )
 

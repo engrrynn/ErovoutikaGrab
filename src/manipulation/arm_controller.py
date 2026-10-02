@@ -531,7 +531,7 @@ class ArmController:
         target_s3 = s3 if s3 is not None else self.cur_s3
         return self.move_arm_simultaneous(self.s1_stow, self.s2_stow, target_s3)
 
-    def execute_pick_sequence(self, wait_completion: bool = False, timeout_s: float = 6.0) -> bool:
+    def execute_pick_sequence(self, wait_completion: bool = False, timeout_s: float = 6.0, clamp_angle: Optional[int] = None) -> bool:
         """Executes full pick-and-lift sequence with smart directional sequencing:
         1. Open gripper wide and confirm jaws finish opening.
         2. Lower arm into ground pick zone (Servo 1 extends first, then simultaneous lowering).
@@ -547,11 +547,12 @@ class ArmController:
         self.move_arm_simultaneous(self.s1_down, self.s2_down, self.s3_open, wait_for_s1=True)
         time.sleep(0.3)
 
-        # Step 3: Clamp gripper firmly on object — MUST finish closing before stowing!
-        self.close_gripper(wait=True)
+        # Step 3: Clamp gripper firmly on object (using calibrated or custom clamp angle)
+        target_clamp = clamp_angle if clamp_angle is not None else self.s3_close
+        self.close_gripper(wait=True, angle=target_clamp)
 
         # Step 4: Raise arm back up holding object (Servo 2 lifts first with object, then simultaneous retraction)
-        self.move_arm_simultaneous(self.s1_stow, self.s2_stow, self.s3_close, wait_for_s1=True)
+        self.move_arm_simultaneous(self.s1_stow, self.s2_stow, target_clamp, wait_for_s1=True)
         time.sleep(0.3)
 
         return True

@@ -53,6 +53,11 @@ yoloe:
   num_threads: 4
   pickable_classes:
   - bottle
+  - spray bottle
+  - spray_bottle
+  - traffic cone
+  - cone
+  - dispenser
   - cup
   - bowl
   - banana

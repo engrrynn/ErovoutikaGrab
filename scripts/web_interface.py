@@ -1920,6 +1920,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <select id="ot_target_select" onchange="onSelectTrackingObject(this.value)" style="flex:1; background:#070d1d; color:#38bdf8; border:1px solid var(--border); padding:7px 10px; border-radius:6px; font-size:13px; font-weight:700; cursor:pointer;">
             <optgroup label="🥤 Drinkware & Containers">
               <option value="bottle">🍾 Bottle</option>
+              <option value="spray bottle">🧴 Spray Bottle (Trained)</option>
               <option value="cup">☕ Cup</option>
               <option value="wine glass">🍷 Wine Glass</option>
               <option value="bowl">🥣 Bowl</option>
@@ -5051,6 +5052,12 @@ class WebHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/vlm/adaptation_log":
             if vlm_planner:
                 self._send_json({"status": "ok", "adaptation": vlm_planner.get_adaptation_stats()})
+            else:
+                self._send_json({"status": "error", "message": "VLM planner not initialized"}, 500)
+
+        elif parsed.path == "/api/vlm/trained_objects":
+            if vlm_planner:
+                self._send_json({"status": "ok", "trained_objects": vlm_planner.get_trained_objects()})
             else:
                 self._send_json({"status": "error", "message": "VLM planner not initialized"}, 500)
 

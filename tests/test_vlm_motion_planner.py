@@ -379,4 +379,72 @@ def test_anti_overextension_reverse_recovery(planner, sweet_spot):
     assert plan.right_pwm < 0
 
 
+def test_trained_spray_bottle_grasp_profile(planner, sweet_spot):
+    """Verify that a green spray bottle (and its cone/dispenser aliases) triggers the calibrated waist grasp profile."""
+    # Spray bottle placed at 15.0cm standoff (ground contact), centered horizontally cx=324
+    det = DetectionResult(
+        detected=True,
+        category="spray bottle",
+        confidence=0.91,
+        material_color="Green",
+        bounding_box=(160, 263, 410, 385),  # cx=324, w=122, h=250
+        mask_polygon=[(263, 160), (385, 160), (385, 410), (263, 410)],
+        mask_area=24000
+    )
+    plan = planner.plan_movement(det, sweet_spot, dist_cm=15.0, target_dist_cm=15.0, use_vlm_llm=False)
+    assert plan.action == "ALIGNED_GRASP"
+    assert plan.arm_plan["arm_action"] == "EXECUTE_GRAB"
+    assert plan.arm_plan["profile_matched"] is True
+    assert plan.arm_plan["grasp_zone"] == "waist"
+    # Verify calibrated clamp angle is within calibrated band around 52°
+    calibrated_clamp = plan.arm_plan["calibrated_angles"]["grip_target"]
+    assert 48 <= calibrated_clamp <= 56
+    # Verify grasp point is at ~65% height (waist, below nozzle trigger)
+    grasp_pt = plan.arm_plan["grasp_point"]
+    assert grasp_pt is not None
+    assert grasp_pt[0] == 324  # Centered in X
+    assert 315 <= grasp_pt[1] <= 335  # Waist Y coordinate (160 + 250*0.65 = 322.5)
+
+    # Test cone alias (YOLOE classification behavior for spray bottles)
+    det_cone = DetectionResult(
+        detected=True,
+        category="traffic cone",
+        confidence=0.75,
+        material_color="Green",
+        bounding_box=(160, 263, 410, 385),
+        mask_polygon=[(263, 160), (385, 160), (385, 410), (263, 410)],
+        mask_area=24000
+    )
+    plan_cone = planner.plan_movement(det_cone, sweet_spot, dist_cm=15.0, target_dist_cm=15.0, use_vlm_llm=False)
+    assert plan_cone.action == "ALIGNED_GRASP"
+    assert plan_cone.arm_plan["profile_matched"] is True
+    assert plan_cone.arm_plan["grasp_zone"] == "waist"
+
+
+def test_train_object_grasp_dynamic_registration(planner, sweet_spot, tmp_path, monkeypatch):
+    """Verify that train_object_grasp dynamically registers and persists new object profiles."""
+    test_json = str(tmp_path / "test_trained_objects.json")
+    monkeypatch.setattr(planner, "trained_objects_path", test_json)
+
+    planner.train_object_grasp("marker", {
+        "name": "Dry Erase Marker",
+        "aliases": ["marker", "pen", "highlighter"],
+        "target_distance_cm": 13.0,
+        "standoff_band_cm": [-8.0, 5.0],
+        "grasp_zone": "top_cap",
+        "clamp_angle_deg": 42,
+        "sweet_spot_offset_y": 0.30,
+        "description": "Slender cylindrical marker. Pinch upper barrel with 42° clamp."
+    })
+
+    prof = planner.get_object_grasp_profile("pen")
+    assert prof is not None
+    assert prof["clamp_angle_deg"] == 42
+    assert prof["grasp_zone"] == "top_cap"
+
+    all_trained = planner.get_trained_objects()
+    assert "marker" in all_trained
+
+
+
 

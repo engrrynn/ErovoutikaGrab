@@ -1,0 +1,60 @@
+{
+  "spray_bottle": {
+    "name": "Green Spray Bottle",
+    "aliases": [
+      "spray bottle",
+      "spray_bottle",
+      "cleaning spray",
+      "dispenser",
+      "traffic cone",
+      "cone",
+      "bottle"
+    ],
+    "target_distance_cm": 15.0,
+    "standoff_band_cm": [
+      -12.0,
+      6.0
+    ],
+    "grasp_zone": "waist",
+    "ideal_box_width_px": 122,
+    "ideal_box_height_px": 250,
+    "aspect_ratio": 2.05,
+    "clamp_angle_deg": 52,
+    "sweet_spot_offset_y": 0.65,
+    "approach_ground_y_px": 440,
+    "description": "Upright cleaning spray bottle with trigger nozzle. Grasp waist body at 65% height to clear trigger head; clamp firmly at 52°.",
+    "shoulder_down_deg": 170,
+    "elbow_down_deg": 0,
+    "stow_shoulder_deg": 93,
+    "stow_elbow_deg": 45,
+    "trained_at": "2026-10-02T15:15:00+08:00"
+  },
+  "bottle": {
+    "name": "Standard Beverage Bottle",
+    "aliases": [
+      "bottle",
+      "water bottle",
+      "flask",
+      "can",
+      "cup"
+    ],
+    "target_distance_cm": 15.0,
+    "standoff_band_cm": [
+      -12.0,
+      6.0
+    ],
+    "grasp_zone": "body",
+    "ideal_box_width_px": 110,
+    "ideal_box_height_px": 200,
+    "aspect_ratio": 1.8,
+    "clamp_angle_deg": 48,
+    "sweet_spot_offset_y": 0.55,
+    "approach_ground_y_px": 430,
+    "description": "Cylindrical beverage container. Grasp body mid-section with 48° clamp.",
+    "shoulder_down_deg": 170,
+    "elbow_down_deg": 0,
+    "stow_shoulder_deg": 93,
+    "stow_elbow_deg": 45,
+    "trained_at": "2026-10-02T15:15:00+08:00"
+  }
+}

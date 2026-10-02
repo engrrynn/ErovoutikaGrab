@@ -439,7 +439,7 @@ class ActivityManager:
         }
         return target_s1, target_s2
 
-    def _trigger_autonomous_grab(self, target_name: str) -> bool:
+    def _trigger_autonomous_grab(self, target_name: str, clamp_angle: Optional[int] = None) -> bool:
         """Initiates autonomous grab sequence when target has settled in the sweet spot."""
         if self._is_grabbing or not self.config.get("motion_enabled", True):
             return False
@@ -458,7 +458,7 @@ class ActivityManager:
                 time.sleep(0.2)
                 if self.arm:
                     self.arm.reload_config()
-                    self.arm.execute_pick_sequence(wait_completion=True, timeout_s=6.5)
+                    self.arm.execute_pick_sequence(wait_completion=True, timeout_s=6.5, clamp_angle=clamp_angle)
                     self.telemetry["status"] = "OBJECT_SECURED"
                     self.telemetry["details"] = f"Object '{target_name}' successfully grasped and lifted to stow position!"
                     print(f"[Activities] Autonomous pick complete for '{target_name}'.")
@@ -467,7 +467,8 @@ class ActivityManager:
                     limits = self._get_arm_limits()
                     s1_stow, s1_down = limits["s1_stow"], limits["s1_down"]
                     s2_stow, s2_down = limits["s2_stow"], limits["s2_down"]
-                    s3_open, s3_close = limits["s3_open"], limits["s3_close"]
+                    s3_open = limits["s3_open"]
+                    target_s3_close = clamp_angle if clamp_angle is not None else limits["s3_close"]
 
                     # Step 1: Open gripper
                     self.comm.send_servos(s1_stow, s2_stow, s3_open)
@@ -476,10 +477,10 @@ class ActivityManager:
                     self.comm.send_servos(s1_down, s2_down, s3_open)
                     time.sleep(0.7)
                     # Step 3: Clamp jaws
-                    self.comm.send_servos(s1_down, s2_down, s3_close)
+                    self.comm.send_servos(s1_down, s2_down, target_s3_close)
                     time.sleep(0.6)
                     # Step 4: Stow arm
-                    self.comm.send_servos(s1_stow, s2_stow, s3_close)
+                    self.comm.send_servos(s1_stow, s2_stow, target_s3_close)
                     time.sleep(0.7)
                     self.telemetry["status"] = "OBJECT_SECURED"
                     self.telemetry["details"] = f"Object '{target_name}' secured in gripper!"
@@ -1683,10 +1684,15 @@ class ActivityManager:
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
             is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
 
-            if is_x_centered and is_y_centered and is_near and not is_moving:
-                self._ik_settled_frames += 1
-                if self._ik_settled_frames >= 10 and not self._is_grabbing:
-                    self._trigger_autonomous_grab(target_color)
+            vplan = self.telemetry.get("vlm_plan") or {}
+            vlm_action = vplan.get("action", "")
+            is_vlm_aligned = (vlm_action == "ALIGNED_GRASP")
+            vlm_clamp_angle = (vplan.get("arm_plan") or {}).get("calibrated_angles", {}).get("grip_target")
+
+            if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
+                self._ik_settled_frames += (2 if is_vlm_aligned else 1)
+                if self._ik_settled_frames >= 8 and not self._is_grabbing:
+                    self._trigger_autonomous_grab(target_color, clamp_angle=vlm_clamp_angle)
             else:
                 self._ik_settled_frames = max(0, self._ik_settled_frames - 1)
 
@@ -1739,7 +1745,9 @@ class ActivityManager:
 
         # Synonym dictionary for fuzzy class matching
         SYNONYM_MAP = {
-            "bottle": ["bottle", "water bottle", "plastic bottle", "wine bottle", "beer bottle", "can", "cup", "flask", "jar", "container"],
+            "bottle": ["bottle", "water bottle", "plastic bottle", "wine bottle", "beer bottle", "can", "cup", "flask", "jar", "container", "spray bottle", "spray_bottle", "traffic cone", "cone", "dispenser"],
+            "spray bottle": ["spray bottle", "spray_bottle", "spray", "cleaning spray", "bottle", "traffic cone", "cone", "dispenser", "container"],
+            "spray_bottle": ["spray bottle", "spray_bottle", "spray", "cleaning spray", "bottle", "traffic cone", "cone", "dispenser", "container"],
             "cup": ["cup", "mug", "coffee cup", "glass", "bottle", "can"],
             "phone": ["cell phone", "phone", "mobile phone", "telephone", "remote", "control"],
             "person": ["person", "human", "man", "woman", "boy", "girl", "leg", "legs", "pants"],
@@ -1987,10 +1995,15 @@ class ActivityManager:
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
             is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
 
-            if is_x_centered and is_y_centered and is_near and not is_moving:
-                self._ik_settled_frames += 1
-                if self._ik_settled_frames >= 10 and not self._is_grabbing:
-                    self._trigger_autonomous_grab(cat_name)
+            vplan = self.telemetry.get("vlm_plan") or {}
+            vlm_action = vplan.get("action", "")
+            is_vlm_aligned = (vlm_action == "ALIGNED_GRASP")
+            vlm_clamp_angle = (vplan.get("arm_plan") or {}).get("calibrated_angles", {}).get("grip_target")
+
+            if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
+                self._ik_settled_frames += (2 if is_vlm_aligned else 1)
+                if self._ik_settled_frames >= 8 and not self._is_grabbing:
+                    self._trigger_autonomous_grab(cat_name, clamp_angle=vlm_clamp_angle)
             else:
                 self._ik_settled_frames = max(0, self._ik_settled_frames - 1)
 
@@ -2302,10 +2315,15 @@ class ActivityManager:
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
             is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
 
-            if is_x_centered and is_y_centered and is_near and not is_moving:
-                self._ik_settled_frames += 1
-                if self._ik_settled_frames >= 10 and not self._is_grabbing:
-                    self._trigger_autonomous_grab(full_title)
+            vplan = self.telemetry.get("vlm_plan") or {}
+            vlm_action = vplan.get("action", "")
+            is_vlm_aligned = (vlm_action == "ALIGNED_GRASP")
+            vlm_clamp_angle = (vplan.get("arm_plan") or {}).get("calibrated_angles", {}).get("grip_target")
+
+            if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
+                self._ik_settled_frames += (2 if is_vlm_aligned else 1)
+                if self._ik_settled_frames >= 8 and not self._is_grabbing:
+                    self._trigger_autonomous_grab(full_title, clamp_angle=vlm_clamp_angle)
             else:
                 self._ik_settled_frames = max(0, self._ik_settled_frames - 1)
 
