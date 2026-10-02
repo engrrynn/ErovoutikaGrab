@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_OBJECT_GRASP_PROFILES: Dict[str, Dict[str, Any]] = {
     "spray_bottle": {
         "name": "Green Spray Bottle",
-        "aliases": ["spray bottle", "spray_bottle", "cleaning spray", "dispenser", "traffic cone", "cone", "bottle"],
+        "aliases": ["spray bottle", "spray_bottle", "cleaning spray", "dispenser", "traffic cone", "cone", "bottle", "vase", "aqua"],
         "target_distance_cm": 15.0,
         "standoff_band_cm": (-12.0, 6.0),
         "grasp_zone": "waist",
@@ -909,8 +909,9 @@ class VLMMotionPlanner:
         # ------------------------------------------------------------------
         # BRANCH 2: SWEET-SPOT AREA RATIO PATH PLANNING (Unit test & camera fallback)
         # ------------------------------------------------------------------
-        # Scenario 1: Already inside sweet-spot zone (Ready for Servo Arm Grasp)
-        if is_centered and (0.85 <= area_ratio <= 1.18):
+        # Scenario 1: Already inside sweet-spot zone or in front ground pick reach (Ready for Servo Arm Grasp)
+        is_ground_reach = (ymax >= 320)
+        if is_centered and (0.85 <= area_ratio <= 1.18 or is_ground_reach):
             arm_plan = self._compute_arm_plan("ALIGNED_GRASP", category, box_w, sw, area_ratio, is_centered, bbox=bbox)
             grip_target = arm_plan["calibrated_angles"]["grip_target"]
             s1_down_angle = arm_plan["calibrated_angles"].get("s1_down", self.s1_down)
@@ -936,15 +937,15 @@ class VLMMotionPlanner:
                 target_info=target_info,
                 arm_plan=arm_plan,
                 rationale=(
-                    f"Target {category} is fully aligned in X (dx={dx:+d}px) and area ratio is {area_ratio*100:.1f}%. "
+                    f"Target {category} is fully aligned in X (dx={dx:+d}px) and in ground pick reach (ymax={ymax}px). "
                     f"Servo arm grab planned per robot config: Lower S1({s1_down_angle}°) & S2({s2_down_angle}°), "
                     f"clamp S3({grip_target}°), and lift to stow (S1:{self.s1_stow}°, S2:{self.s2_stow}°)."
                 ),
                 source="VLM_KINEMATIC"
             )
 
-        # Scenario 2: Overshot target (too close / behind grasp threshold)
-        if is_centered and (area_ratio > 1.18):
+        # Scenario 2: Overshot target (too close / behind grasp threshold when not in ground reach)
+        if is_centered and (area_ratio > 1.18) and not is_ground_reach:
             damping = 0.85
             adjusted_pwm = max(self.base_speed, max(self.min_overcoming_pwm, min(self.max_speed, round(self.base_speed * damping))))
             arm_plan = self._compute_arm_plan("NUDGE_BACK", category, box_w, sw, area_ratio, is_centered)

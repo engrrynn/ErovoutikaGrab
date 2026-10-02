@@ -48,6 +48,12 @@ DEFAULT_PICKABLE_CLASSES = [
     "bottle",
     "spray bottle",
     "spray_bottle",
+    "aqua",
+    "vase",
+    "flask",
+    "thermos",
+    "detergent",
+    "cleaning product",
     "traffic cone",
     "cone",
     "dispenser",
@@ -407,8 +413,9 @@ class YOLOEVisionAdapter(BaseVisionAdapter):
                     else:
                         pickable = (not too_large) and (not too_small)
 
-                    # Boost score for pickable objects so they get priority
-                    score = conf + (0.5 if pickable else 0.0)
+                    # Boost score for pickable objects and foreground proximity so foreground targets get priority
+                    proximity_boost = (det["bbox"][2] / float(h)) * 0.4
+                    score = conf + (0.5 if pickable else 0.0) + proximity_boost
 
                     if score > best_score:
                         best_score = score
@@ -492,8 +499,9 @@ class YOLOEVisionAdapter(BaseVisionAdapter):
                     else:
                         pickable = (not too_large) and (not too_small)
 
-                    # Boost score for pickable objects so they get priority
-                    score = conf + (0.5 if pickable else 0.0)
+                    # Boost score for pickable objects and foreground proximity so foreground targets get priority
+                    proximity_boost = (ymax / float(h)) * 0.4
+                    score = conf + (0.5 if pickable else 0.0) + proximity_boost
 
                     if score > best_conf:
                         best_conf = score

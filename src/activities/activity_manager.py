@@ -427,7 +427,12 @@ class ActivityManager:
             self._arm_last_s2 = target_s2
             self._arm_last_update_time = now
 
-        status = "PITCH_DOWN" if ey > 0 else "PITCH_UP"
+        at_ground_limit = (target_s1 >= s1_down - 5) and (target_s2 <= s2_down + 5)
+        if at_ground_limit:
+            status = "SETTLED_AT_LIMIT"
+        else:
+            status = "PITCH_DOWN" if ey > 0 else "PITCH_UP"
+
         self.telemetry["arm_ik"] = {
             "s1": target_s1,
             "s2": target_s2,
@@ -1681,7 +1686,7 @@ class ActivityManager:
             # Settle & Autonomous Grab Trigger:
             # If target is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
-            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
+            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
             is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
 
             vplan = self.telemetry.get("vlm_plan") or {}
@@ -1691,7 +1696,7 @@ class ActivityManager:
 
             if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
                 self._ik_settled_frames += (2 if is_vlm_aligned else 1)
-                if self._ik_settled_frames >= 8 and not self._is_grabbing:
+                if self._ik_settled_frames >= 4 and not self._is_grabbing:
                     self._trigger_autonomous_grab(target_color, clamp_angle=vlm_clamp_angle)
             else:
                 self._ik_settled_frames = max(0, self._ik_settled_frames - 1)
@@ -1992,7 +1997,7 @@ class ActivityManager:
             # Settle & Autonomous Grab Trigger:
             # If target object is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
-            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
+            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
             is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
 
             vplan = self.telemetry.get("vlm_plan") or {}
@@ -2002,7 +2007,7 @@ class ActivityManager:
 
             if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
                 self._ik_settled_frames += (2 if is_vlm_aligned else 1)
-                if self._ik_settled_frames >= 8 and not self._is_grabbing:
+                if self._ik_settled_frames >= 4 and not self._is_grabbing:
                     self._trigger_autonomous_grab(cat_name, clamp_angle=vlm_clamp_angle)
             else:
                 self._ik_settled_frames = max(0, self._ik_settled_frames - 1)
@@ -2312,7 +2317,7 @@ class ActivityManager:
             # Settle & Autonomous Grab Trigger:
             # If target is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
-            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") == "CENTERED"
+            is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
             is_near = (dist_cm <= target_dist + 5.0) or (dist_cm <= 32.0)
 
             vplan = self.telemetry.get("vlm_plan") or {}
@@ -2322,7 +2327,7 @@ class ActivityManager:
 
             if (is_x_centered and is_y_centered and is_near and not is_moving) or is_vlm_aligned:
                 self._ik_settled_frames += (2 if is_vlm_aligned else 1)
-                if self._ik_settled_frames >= 8 and not self._is_grabbing:
+                if self._ik_settled_frames >= 4 and not self._is_grabbing:
                     self._trigger_autonomous_grab(full_title, clamp_angle=vlm_clamp_angle)
             else:
                 self._ik_settled_frames = max(0, self._ik_settled_frames - 1)

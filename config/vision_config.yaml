@@ -49,12 +49,17 @@ yoloe:
   confidence_threshold: 0.25
   enforce_limitations: false
   imgsz: 320
-  model_path: models/yoloe-11s-seg-pf.pt
+  model_path: models/yolo11s.tflite
   num_threads: 4
   pickable_classes:
   - bottle
   - spray bottle
   - spray_bottle
+  - aqua
+  - vase
+  - flask
+  - thermos
+  - detergent
   - traffic cone
   - cone
   - dispenser

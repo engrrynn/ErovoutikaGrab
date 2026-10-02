@@ -4980,6 +4980,10 @@ class WebHandler(BaseHTTPRequestHandler):
                 "s1": s1,
                 "s2": s2,
                 "s3": s3,
+                "arduino_s1": getattr(telem, "s1_shoulder", None) if telem else None,
+                "arduino_s2": getattr(telem, "s2_elbow", None) if telem else None,
+                "arduino_s3": getattr(telem, "s3_gripper", None) if telem else None,
+                "telem_age_s": round(time.time() - telem.timestamp, 2) if (telem and getattr(telem, "timestamp", 0) > 0) else None,
                 "feed_destination": feed_destination,
                 "state": get_robot_state_name(),
                 "showcase_running": showcase_running,
@@ -5164,12 +5168,12 @@ class WebHandler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/api/nudge":
             data = self._read_json()
-            direction = data.get("dir", "F")
-            pwm = motor_state.get("nudge_pwm", 245)
-            ms = motor_state.get("nudge_default_ms", 250)
+            direction = data.get("dir", data.get("direction", "F"))
+            pwm = int(data.get("pwm", motor_state.get("nudge_pwm", 245)))
+            ms = int(data.get("duration_ms", data.get("ms", motor_state.get("nudge_default_ms", 250))))
             if comm:
                 comm.send_nudge(direction, ms, pwm)
-            self._send_json({"status": "ok", "nudge": direction})
+            self._send_json({"status": "ok", "nudge": direction, "ms": ms, "pwm": pwm})
 
         elif parsed.path == "/api/stop":
             if comm:

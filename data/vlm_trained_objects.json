@@ -8,7 +8,9 @@
       "dispenser",
       "traffic cone",
       "cone",
-      "bottle"
+      "bottle",
+      "vase",
+      "aqua"
     ],
     "target_distance_cm": 15.0,
     "standoff_band_cm": [

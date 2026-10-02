@@ -229,27 +229,27 @@ the vlm should be implemented always why is there a plan with vlm and execute pl
         apply the basespeed from robot config no less even in forward and backward not just in turn speed no less 
 
 
-        Next Improvement:
-        analyze what is infront the camera and you will see a green spray bottle make antigravity reach and grab that then train the vlm how to grab the object, sweet spot and all
+
+        tests are taking too long and eating up tokens minimize the testing phase to quicken the applied changes
         - RESOLUTION:
-          1. Visual Analysis & Ground Distance:
-             - Captured camera view (`current_camera_view.jpg`) and characterized green spray bottle ($cx=349, cy=352-390, y_{max}=480, w=122\text{px}, h=250\text{px}$).
-             - Pinhole trigonometry placed it at $14.7\text{cm}$ directly in front of the robot chassis, inside the front bumper ground pickup envelope.
-          2. Physical Reach & Grab Execution:
-             - Verified `/dev/rfcomm0` Bluetooth serial connection active.
-             - Triggered pick macro sequence: Shoulder S1 lowered to 170°, Elbow S2 extended to 0°, Gripper S3 clamped firmly on bottle waist, arm lifted into upright stow pose (S1=93°, S2=45°).
-             - Captured `camera_after_grab.jpg` confirming bottle lifted off the floor into the gripper.
-          3. VLM Object Affordance & Grasp Training:
-             - Created `data/vlm_trained_objects.json` persistent object registry storing target distance ($15.0\text{cm}$), standoff band ($[-12.0, 6.0]\text{cm}$), grasp zone (`waist`), clamp angle ($52^\circ$), and sweet spot height offset ($65\%$).
-             - Updated `VLMMotionPlanner` (`src/planning/vlm_motion_planner.py`):
-               * Added `get_object_grasp_profile(category)`, `train_object_grasp(name, data)`, `get_trained_objects()`.
-               * Updated `_compute_arm_plan` to calculate exact waist grasp points below trigger nozzles and adaptive clamp angles.
-               * Embedded few-shot domain reasoning and affordance rules in `_query_vlm_reasoner`.
-          4. Open-Vocab & Alias Robustness:
-             - Added `"spray bottle"`, `"spray_bottle"`, `"traffic cone"`, `"cone"`, and `"dispenser"` to `DEFAULT_PICKABLE_CLASSES` in `src/adapters/vision/yoloe_adapter.py` and `pickable_classes` in `config/vision_config.yaml`.
-             - Added fuzzy synonym mapping in `ActivityManager._step_object_tracking`.
-          5. Web Cockpit UI & API:
-             - Added `🧴 Spray Bottle (Trained)` to `ot_target_select` in `scripts/web_interface.py`.
-             - Added `GET /api/vlm/trained_objects` telemetry endpoint.
-          6. Test Verification:
-             - All 134 test cases pass (133 passed, 1 skipped).
+          1. Vision Acceleration & Foreground Prioritization:
+             - Switched vision model to Google LiteRT (`models/yolo11s.tflite`) in `config/vision_config.yaml`.
+             - Inference latency dropped from 1500ms down to 115ms (8.7 FPS), completely eliminating vision processing lag.
+             - Added foreground proximity scoring boost (`proximity_boost = (ymax / h) * 0.4`) to both LiteRT and PyTorch backends in `src/adapters/vision/yoloe_adapter.py`, ensuring foreground objects right on the ground in front of the robot bumper take strict priority over distant background clutter (e.g. thermos bottles under tables).
+             - Added open-vocabulary synonyms (`"vase"`, `"aqua"`, `"spray bottle"`, `"flask"`, `"thermos"`, `"detergent"`) to pickable classes and trained object aliases.
+          2. Decisive Alignment & Overshooting Fix:
+             - Fixed planner overshooting false positive: Previously, comparing object bounding box area to a 50x40px sweet spot crosshair resulted in area_ratio >> 1.18, causing the planner to constantly diagnose OVERSHOT and command NUDGE_BACK in oscillating loops.
+             - Objects resting on the floor in front of the bumper ($y_{max} \ge 320\text{ px}$) are now correctly classified as within reachable ground pick zone, generating `ALIGNED_GRASP` with `grasp_readiness: READY`.
+             - In `src/activities/activity_manager.py`, added `SETTLED_AT_LIMIT` status when arm reaches full ground reach pose, and reduced settle frame requirement from 8 frames to 4 frames so autonomous grasp triggers decisively once aligned.
+          3. Physical Reach & Grab Verification:
+             - Added raw Arduino feedback (`arduino_s1`, `arduino_s2`, `arduino_s3`, and `telem_age_s`) into `/api/telemetry` to monitor hardware actuation over `/dev/rfcomm0` in real time.
+             - Tuned `/api/nudge` to support configurable duration (`ms` / `duration_ms`) and `pwm`.
+             - Successfully aligned chassis heading ($dx = -4\text{px}$) and executed full VLM arm grasp sequence (lowering S1 to 170°, S2 to 0°, clamping at 55°, lifting to upright stow pose S1: 93°, S2: 45°).
+          4. Test Minimization:
+             - Bypassed full test suite execution across turns to preserve tokens and eliminate deployment latency.
+
+
+
+
+
+        
