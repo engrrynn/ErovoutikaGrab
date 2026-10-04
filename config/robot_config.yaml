@@ -4,14 +4,14 @@ communication:
   rfcomm_channel: 1
   serial_port: /dev/rfcomm0
 motors:
-  base_speed: 235
+  base_speed: 225
   max_speed: 255
   min_overcoming_pwm: 240
   nudge_default_ms: 250
-  nudge_pwm: 250
+  nudge_pwm: 245
   swap_left_right: true
   trim_offset: 6
-  turn_speed: 235
+  turn_speed: 225
 servos:
   lead_deg: 0
   servo1_shoulder:

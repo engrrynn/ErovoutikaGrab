@@ -272,6 +272,31 @@ the vlm should be implemented always why is there a plan with vlm and execute pl
 
 
 there is a 32 - 35 cm distance upon settling of the servo arm when down, abd fix that the servo arm should go down pose first during object and color tracking before detecting 
+- RESOLUTION:
+  1. Pre-Detection Arm Settling Gate:
+     - Implemented threading.Event hard gate (_arm_deploy_event) blocking perception and activity loops for 1.8s upon starting ground pick activities until arm physically reaches lowered pose (S1=170°, S2=0°).
+  2. Ground Contact Distance & IK Alignment:
+     - Passed ymax to _track_arm_elevation across all tracking loops; arm reports APPROACHING_GROUND until ymax >= 445 px (~13.5 cm physical reach).
+     - Tightened standoff bands in vlm_motion_planner.py and vlm_trained_objects.json to [-2.5, 1.5] cm, eliminating premature 32-35 cm settling.
+
+cant connect to another wifi from AP mode
+- RESOLUTION:
+  1. Root Cause Analysis:
+     - When connected via AP mode (hotspot SSID 'Erovoutika_Grab_Bot', IP 10.42.0.1:5001), clicking 'Connect to Network' invoked `connect_to_wifi()` synchronously in the HTTP handler.
+     - `connect_to_wifi()` immediately ran `sudo nmcli con down egrabbot-hotspot` before sending the HTTP response.
+     - Tearing down the AP interface instantly severed the client's TCP socket, causing `net::ERR_CONNECTION_RESET`, `ERR_NETWORK_CHANGED`, and `ERR_INTERNET_DISCONNECTED` in the browser before any response was delivered.
+     - Furthermore, if connecting to the external network failed (e.g. wrong password, out of range, or ssid-not-found), the AP hotspot was never restored, stranding the user without network access.
+  2. Implementation of Two-Phase Async Transition & Rollback Watchdog:
+     - In `scripts/wifi_manager.py`:
+       * Added `configure_wifi_profile()` to pre-create and save clean NetworkManager connection profiles before modifying active radio states.
+       * When in AP mode, `connect_to_wifi()` immediately returns HTTP 200 with `status: 'switching'`, `from_ap: True`, and transition instructions BEFORE taking down the hotspot.
+       * Background worker `_async_transition_worker()` gives a 1.5s grace period for HTTP data to flush, brings down the hotspot, attempts connection to target SSID, and verifies DHCP IP.
+       * Added **Automatic Rollback Watchdog**: If connection to target WiFi fails or times out within 25 seconds, the robot automatically calls `activate_hotspot()`, restoring the 'Erovoutika_Grab_Bot' hotspot so the user is never locked out.
+       * Added `get_transition_status()` and `/api/wifi/transition_status` endpoint.
+  3. Frontend UX Guidance in `scripts/web_interface.py`:
+     - Added `showWiFiSwitchingModal()`: When switching from AP mode, displays an instructive modal guiding the user to connect their device to the target WiFi and navigate to `https://egrabbot.local:5001`, while noting the 25-second auto-recovery fallback.
+     - Handled fetch disconnection errors in `connectWiFi()` to guide the user rather than showing a generic failure.
+  4. Verified with 4 unit tests in `tests/test_wifi_manager.py` (all passed).
 
 
 

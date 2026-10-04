@@ -10,11 +10,35 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from typing import Dict, List, Any, Optional
 import yaml
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NETWORK_CONFIG_PATH = os.path.join(BASE_DIR, "config/network_config.yaml")
+
+_transition_lock = threading.Lock()
+_last_transition_result: Dict[str, Any] = {"status": "idle", "message": ""}
+
+
+def get_transition_status() -> Dict[str, Any]:
+    """Returns the latest asynchronous network transition status and details."""
+    with _transition_lock:
+        return dict(_last_transition_result)
+
+
+def get_active_wifi_connection() -> Optional[str]:
+    """Returns the name of the currently active connection on wlan0, if any."""
+    try:
+        proc = run_cmd(["nmcli", "-t", "-f", "NAME,DEVICE", "con", "show", "--active"], timeout_s=4.0)
+        for line in proc.stdout.splitlines():
+            parts = line.strip().split(":")
+            if len(parts) >= 2 and parts[1] == "wlan0":
+                return parts[0]
+    except Exception:
+        pass
+    return None
 
 
 def load_network_config() -> Dict[str, Any]:
@@ -84,7 +108,8 @@ def get_wifi_status() -> Dict[str, Any]:
         "signal": 0,
         "security": "None",
         "device": "wlan0",
-        "startup_mode": load_network_config().get("startup_mode", "ap")
+        "startup_mode": load_network_config().get("startup_mode", "ap"),
+        "transition": get_transition_status()
     }
 
     try:
@@ -187,101 +212,171 @@ def scan_wifi_networks() -> List[Dict[str, Any]]:
     return res
 
 
+def configure_wifi_profile(ssid: str, password: Optional[str] = None) -> bool:
+    """Pre-configures a clean NetworkManager connection profile for the target SSID.
+    
+    Ensures correct 802-11-wireless-security settings, auto-connect flag, and interface binding
+    before any radio transition occurs.
+    """
+    if not ssid or not ssid.strip():
+        return False
+    clean_ssid = ssid.strip()
+    clean_pwd = password.strip() if (password and password.strip()) else None
+
+    saved = get_saved_wifi_connections()
+    if clean_ssid in saved:
+        run_cmd(["sudo", "nmcli", "con", "delete", clean_ssid], timeout_s=5.0)
+
+    add_cmd = [
+        "sudo", "nmcli", "con", "add",
+        "type", "wifi",
+        "ifname", "wlan0",
+        "con-name", clean_ssid,
+        "ssid", clean_ssid,
+        "connection.autoconnect", "yes"
+    ]
+    if clean_pwd:
+        add_cmd.extend([
+            "802-11-wireless-security.key-mgmt", "wpa-psk",
+            "802-11-wireless-security.psk", clean_pwd
+        ])
+    add_proc = run_cmd(add_cmd, timeout_s=8.0)
+    return add_proc.returncode == 0
+
+
+def _async_transition_worker(ssid: str, password: Optional[str], was_hotspot: bool, prev_con: Optional[str]):
+    """Background worker that performs the radio transition to Station mode with automatic rollback watchdog."""
+    global _last_transition_result
+    with _transition_lock:
+        _last_transition_result = {
+            "status": "in_progress",
+            "target_ssid": ssid,
+            "from_ap": was_hotspot,
+            "start_time": time.time(),
+            "message": f"Connecting to '{ssid}'..."
+        }
+
+    # Grace period (1.5 seconds) allowing HTTP response to cleanly flush to browser socket
+    time.sleep(1.5)
+
+    print(f"[WiFiManager] Starting async transition to '{ssid}' (was_hotspot={was_hotspot}, prev_con={prev_con})...")
+
+    # Step 1: Disconnect current radio link on wlan0 cleanly
+    if was_hotspot:
+        run_cmd(["sudo", "nmcli", "con", "down", "egrabbot-hotspot"], timeout_s=6.0)
+    elif prev_con and prev_con != ssid:
+        run_cmd(["sudo", "nmcli", "con", "down", prev_con], timeout_s=6.0)
+
+    time.sleep(1.0)
+
+    # Step 2: Attempt connection to target SSID
+    up_proc = run_cmd(["sudo", "nmcli", "con", "up", ssid], timeout_s=22.0)
+    if up_proc.returncode != 0 and password:
+        # Fallback via direct nmcli dev wifi connect
+        cmd = ["sudo", "nmcli", "dev", "wifi", "connect", ssid, "password", password]
+        run_cmd(cmd, timeout_s=22.0)
+
+    # Step 3: Poll for active status & valid DHCP IP (up to 12s)
+    success = False
+    new_ip = "Disconnected"
+    for _ in range(12):
+        time.sleep(1.0)
+        active = get_active_wifi_connection()
+        ip = get_current_ip()
+        if active == ssid and ip not in ("Disconnected", "10.42.0.1") and not ip.startswith("127."):
+            success = True
+            new_ip = ip
+            break
+
+    if success:
+        print(f"[WiFiManager] Successfully connected to '{ssid}'! IP: {new_ip}")
+        cfg = load_network_config()
+        cfg["last_connected_ssid"] = ssid
+        cfg["startup_mode"] = "wifi"
+        save_network_config(cfg)
+        with _transition_lock:
+            _last_transition_result = {
+                "status": "ok",
+                "target_ssid": ssid,
+                "ip": new_ip,
+                "message": f"Successfully connected to '{ssid}' (IP: {new_ip})"
+            }
+    else:
+        err_msg = up_proc.stderr.strip() or up_proc.stdout.strip() or "Connection timed out or network unavailable."
+        print(f"[WiFiManager] Failed to connect to '{ssid}': {err_msg}. Triggering automatic rollback watchdog...")
+
+        with _transition_lock:
+            _last_transition_result = {
+                "status": "rollback",
+                "target_ssid": ssid,
+                "error": err_msg,
+                "message": f"Failed to connect to '{ssid}'. Rolling back network."
+            }
+
+        # AUTOMATIC ROLLBACK WATCHDOG:
+        if was_hotspot:
+            print("[WiFiManager] Watchdog restoring Access Point Hotspot mode...")
+            activate_hotspot()
+            print("[WiFiManager] Access Point Hotspot restored.")
+        elif prev_con:
+            print(f"[WiFiManager] Watchdog restoring previous connection '{prev_con}'...")
+            run_cmd(["sudo", "nmcli", "con", "up", prev_con], timeout_s=15.0)
+
+
 def connect_to_wifi(ssid: str, password: Optional[str] = None) -> Dict[str, Any]:
-    """Seamlessly connects the robot to a specified WiFi network."""
+    """Seamlessly connects the robot to a specified WiFi network.
+    
+    If currently in AP (Hotspot) mode, pre-configures credentials and immediately
+    returns transition instructions to prevent ERR_CONNECTION_RESET, then runs
+    the network switch in a background thread guarded by an automatic rollback watchdog.
+    """
     if not ssid or not ssid.strip():
         return {"status": "error", "message": "SSID cannot be empty."}
 
     ssid = ssid.strip()
     password = password.strip() if (password and password.strip()) else None
 
-    # Step 1: If AP hotspot is currently active on wlan0, deactivate it cleanly
-    try:
-        chk_ap = run_cmd(["nmcli", "-t", "-f", "NAME,DEVICE", "con", "show", "--active"])
-        for line in chk_ap.stdout.splitlines():
-            if "egrabbot-hotspot" in line:
-                run_cmd(["sudo", "nmcli", "con", "down", "egrabbot-hotspot"], timeout_s=6.0)
-                break
-    except Exception:
-        pass
+    active_con = get_active_wifi_connection()
+    is_hotspot = (active_con == "egrabbot-hotspot")
 
-    saved = get_saved_wifi_connections()
+    # Pre-configure profile cleanly in NetworkManager before dropping anything
+    ok = configure_wifi_profile(ssid, password)
+    if not ok:
+        return {"status": "error", "message": f"Failed to save profile for '{ssid}' in NetworkManager."}
 
-    # Step 2: Try activating existing saved connection profile if available
-    if ssid in saved:
-        if password:
-            # Update password with explicit key-mgmt wpa-psk
-            run_cmd([
-                "sudo", "nmcli", "con", "modify", ssid,
-                "802-11-wireless-security.key-mgmt", "wpa-psk",
-                "802-11-wireless-security.psk", password
-            ], timeout_s=5.0)
+    # Persist target config immediately
+    cfg = load_network_config()
+    cfg["last_connected_ssid"] = ssid
+    cfg["startup_mode"] = "wifi"
+    save_network_config(cfg)
 
-        up_proc = run_cmd(["sudo", "nmcli", "con", "up", ssid], timeout_s=20.0)
-        if up_proc.returncode == 0:
-            cfg = load_network_config()
-            cfg["last_connected_ssid"] = ssid
-            save_network_config(cfg)
-            new_ip = get_current_ip()
-            return {
-                "status": "ok",
-                "message": f"Successfully connected to saved network '{ssid}'!",
-                "ssid": ssid,
-                "ip": new_ip
-            }
+    # Launch background transition worker with rollback watchdog
+    t = threading.Thread(
+        target=_async_transition_worker,
+        args=(ssid, password, is_hotspot, active_con),
+        daemon=True
+    )
+    t.start()
 
-    # Step 3: Try nmcli dev wifi connect
-    cmd = ["sudo", "nmcli", "dev", "wifi", "connect", ssid]
-    if password:
-        cmd.extend(["password", password])
-
-    try:
-        proc = run_cmd(cmd, timeout_s=25.0)
-        if proc.returncode == 0:
-            cfg = load_network_config()
-            cfg["last_connected_ssid"] = ssid
-            save_network_config(cfg)
-            new_ip = get_current_ip()
-            return {
-                "status": "ok",
-                "message": f"Successfully connected to '{ssid}'!",
-                "ssid": ssid,
-                "ip": new_ip
-            }
-        
-        err = proc.stderr.strip() or proc.stdout.strip()
-
-        # Step 4: If dev wifi connect failed with 802-11-wireless-security error, explicitly add profile with full key-mgmt
-        if password:
-            run_cmd(["sudo", "nmcli", "con", "delete", ssid], timeout_s=4.0)
-            add_cmd = [
-                "sudo", "nmcli", "con", "add", "type", "wifi", "ifname", "wlan0",
-                "con-name", ssid, "ssid", ssid,
-                "802-11-wireless-security.key-mgmt", "wpa-psk",
-                "802-11-wireless-security.psk", password
-            ]
-            add_proc = run_cmd(add_cmd, timeout_s=8.0)
-            if add_proc.returncode == 0:
-                up_proc = run_cmd(["sudo", "nmcli", "con", "up", ssid], timeout_s=20.0)
-                if up_proc.returncode == 0:
-                    cfg = load_network_config()
-                    cfg["last_connected_ssid"] = ssid
-                    save_network_config(cfg)
-                    return {
-                        "status": "ok",
-                        "message": f"Successfully configured and connected to '{ssid}'!",
-                        "ssid": ssid,
-                        "ip": get_current_ip()
-                    }
-                err = up_proc.stderr.strip() or up_proc.stdout.strip()
-            else:
-                err = add_proc.stderr.strip() or add_proc.stdout.strip()
-
-        return {"status": "error", "message": f"Failed to connect: {err}"}
-    except subprocess.TimeoutExpired:
-        return {"status": "error", "message": "Connection timed out. Check password or router range."}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    if is_hotspot:
+        return {
+            "status": "switching",
+            "from_ap": True,
+            "target_ssid": ssid,
+            "message": (
+                f"WiFi credentials for '{ssid}' saved! The robot is transitioning from Hotspot "
+                f"to WiFi Station mode. Your device will now disconnect from 'Erovoutika_Grab_Bot'. "
+                f"Please connect your device to '{ssid}' and open https://egrabbot.local:5001. "
+                f"If connection fails, the robot will automatically restore the hotspot in 25 seconds."
+            )
+        }
+    else:
+        return {
+            "status": "switching",
+            "from_ap": False,
+            "target_ssid": ssid,
+            "message": f"Switching to '{ssid}'... Please wait."
+        }
 
 
 def activate_hotspot(ssid: Optional[str] = None, password: Optional[str] = None) -> Dict[str, Any]:
@@ -290,13 +385,8 @@ def activate_hotspot(ssid: Optional[str] = None, password: Optional[str] = None)
     ap_ssid = ssid.strip() if ssid else cfg.get("ap_ssid", "Erovoutika_Grab_Bot")
     ap_pwd = password.strip() if password else cfg.get("ap_password", "egrabbot1234")
 
-    # Seamless switch: Disconnect active wifi client connection on wlan0 first
-    saved = get_saved_wifi_connections()
-    for con in saved:
-        try:
-            run_cmd(["sudo", "nmcli", "con", "down", con], timeout_s=4.0)
-        except Exception:
-            pass
+    # Cleanly disconnect active connection on wlan0
+    run_cmd(["sudo", "nmcli", "dev", "disconnect", "wlan0"], timeout_s=5.0)
 
     # Ensure profile exists with correct settings
     chk = run_cmd(["nmcli", "con", "show", "egrabbot-hotspot"])

@@ -4349,6 +4349,37 @@ HTML_PAGE = """<!DOCTYPE html>
       el.type = el.type === 'password' ? 'text' : 'password';
     }
 
+    function showWiFiSwitchingModal(targetSsid) {
+      const existing = document.getElementById('wifi_switching_overlay');
+      if (existing) existing.remove();
+
+      const modal = document.createElement('div');
+      modal.id = 'wifi_switching_overlay';
+      modal.style = "position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(3,7,18,0.92); z-index:999999; display:flex; align-items:center; justify-content:center; backdrop-filter:blur(6px); font-family:sans-serif;";
+      modal.innerHTML = `
+        <div style="background:#0f172a; border:2px solid #38bdf8; border-radius:14px; max-width:480px; width:90%; padding:24px; box-shadow:0 20px 40px rgba(0,0,0,0.8); text-align:center; color:#fff;">
+          <div style="font-size:36px; margin-bottom:8px;">📡</div>
+          <h3 style="margin:0 0 8px 0; color:#38bdf8; font-size:20px;">Switching to "${targetSsid}"</h3>
+          <p style="color:#94a3b8; font-size:13px; line-height:1.5; margin-bottom:16px;">
+            The robot is transitioning from <strong>Hotspot (AP)</strong> to <strong>WiFi Station mode</strong>. Your device will disconnect from this hotspot.
+          </p>
+          <div style="background:#1e293b; border-radius:8px; padding:14px; text-align:left; font-size:13px; margin-bottom:16px;">
+            <div style="color:#f8fafc; font-weight:700; margin-bottom:6px;">Next Steps:</div>
+            <div style="color:#cbd5e1; margin-bottom:6px;">1. Connect your phone/laptop to WiFi: <strong style="color:#38bdf8;">${targetSsid}</strong></div>
+            <div style="color:#cbd5e1; margin-bottom:6px;">2. Open the robot at: <a href="https://egrabbot.local:5001" target="_blank" style="color:#10b981; font-weight:700; text-decoration:underline;">https://egrabbot.local:5001</a></div>
+          </div>
+          <div style="font-size:11px; color:#f59e0b; margin-bottom:18px; line-height:1.4;">
+            🛡️ <em>Automatic Rollback Active: If connection to "${targetSsid}" fails within 25 seconds, the robot will automatically restore the "Erovoutika_Grab_Bot" hotspot.</em>
+          </div>
+          <div style="display:flex; gap:10px; justify-content:center;">
+            <a href="https://egrabbot.local:5001" style="padding:10px 18px; text-decoration:none; font-weight:700; border-radius:6px; background:#10b981; color:#fff; display:inline-block;">Open egrabbot.local:5001</a>
+            <button onclick="document.getElementById('wifi_switching_overlay').remove()" style="padding:10px 14px; background:#334155; border:none; border-radius:6px; color:#fff; cursor:pointer;">Dismiss</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
+
     function connectWiFi() {
       const ssidEl = document.getElementById('wifi_input_ssid');
       const pwdEl = document.getElementById('wifi_input_pwd');
@@ -4381,6 +4412,9 @@ HTML_PAGE = """<!DOCTYPE html>
         if (d.status === 'ok') {
           showToast('msg_wifi_connect', `✅ ${d.message} (IP: ${d.ip})`, '#10b981');
           refreshWiFiStatus();
+        } else if (d.status === 'switching') {
+          showToast('msg_wifi_connect', `📡 ${d.message}`, '#38bdf8');
+          showWiFiSwitchingModal(d.target_ssid || ssid);
         } else {
           showToast('msg_wifi_connect', `❌ ${d.message}`, '#ef4444');
         }
@@ -4390,7 +4424,11 @@ HTML_PAGE = """<!DOCTYPE html>
           btn.disabled = false;
           btn.innerText = '🔗 Connect to Network';
         }
-        showToast('msg_wifi_connect', `Network error connecting: ${e}`, '#ef4444');
+        if (window.location.hostname === '10.42.0.1') {
+          showWiFiSwitchingModal(ssid);
+        } else {
+          showToast('msg_wifi_connect', `Network disconnected during switch. Please connect to "${ssid}" and open https://egrabbot.local:5001`, '#38bdf8');
+        }
       });
     }
 
@@ -5070,6 +5108,9 @@ class WebHandler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/api/wifi/scan":
             self._send_json({"status": "ok", "networks": wifi_manager.scan_wifi_networks()})
+
+        elif parsed.path == "/api/wifi/transition_status":
+            self._send_json(wifi_manager.get_transition_status())
         else:
             self.send_error(404, "Not Found")
 
