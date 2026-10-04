@@ -1541,6 +1541,10 @@ HTML_PAGE = """<!DOCTYPE html>
           <div class="lcd-hud-stat-lbl">Bluetooth Link</div>
           <div class="lcd-hud-stat-val" id="lcd_hud_link" style="color:#4ade80;">● ONLINE</div>
         </div>
+        <div class="lcd-hud-stat">
+          <div class="lcd-hud-stat-lbl">WiFi Network</div>
+          <div class="lcd-hud-stat-val" id="lcd_hud_wifi" style="color:#38bdf8;">📡 AP: Erovoutika_Grab_Bot</div>
+        </div>
       </div>
     </div>
 
@@ -1570,10 +1574,11 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
         <div class="lcd-gauge-card">
           <div class="lcd-gauge-title">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg>
-            Hardware Communication
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg>
+            Hardware & Wireless Comms
           </div>
           <div class="lcd-gauge-val-xl" id="lcd_g_link">● HC-05 BLUETOOTH CONNECTED</div>
+          <div class="lcd-gauge-val-xl" id="lcd_g_wifi" style="font-size:16px; margin-top:6px; color:#38bdf8;">📡 AP: EROVOUTIKA_GRAB_BOT (10.42.0.1)</div>
           <div class="lcd-gauge-sub-xl" id="lcd_g_ping">Ping Latency: 440 ms | Port: /dev/rfcomm0</div>
         </div>
         <div class="lcd-gauge-card">
@@ -1616,7 +1621,11 @@ HTML_PAGE = """<!DOCTYPE html>
 
   <!-- Autonomous Mission Control Bar -->
   <div class="cockpit-mission-bar">
-    <div class="state-pill" id="web_state_pill">STATE: IDLE</div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <div class="state-pill" id="web_state_pill">STATE: IDLE</div>
+      <span id="web_bt_pill" class="state-pill" style="font-size:11px; padding:3px 10px; border-color:#4ade80; color:#4ade80;">● BT: HC-05 ONLINE</span>
+      <span id="web_wifi_pill" class="state-pill" style="font-size:11px; padding:3px 10px; border-color:#38bdf8; color:#38bdf8; cursor:pointer;" onclick="switchTab('tab-network')" title="Click to view WiFi & Hotspot settings">📡 WIFI: AP MODE</span>
+    </div>
     <div class="mission-actions">
       <button class="btn btn-green" id="btn_auto_pick" onclick="toggleAuto()">▶ START AUTO PICK</button>
       <button class="btn btn-red" onclick="sendStop()">🛑 EMERGENCY STOP</button>
@@ -2776,6 +2785,26 @@ HTML_PAGE = """<!DOCTYPE html>
           const isPick = y.pickable || false;
           const isAlign = y.aligned || false;
 
+          // Parse WiFi telemetry
+          const w = d.wifi || {};
+          const wMode = (w.mode || 'disconnected').toLowerCase();
+          const wSsid = w.ssid || 'None';
+          const wIp = w.ip || '';
+
+          let wifiText = '○ WIFI: OFFLINE';
+          let wifiColor = '#ef4444';
+          let wifiBorder = '#ef4444';
+
+          if (wMode === 'hotspot') {
+            wifiText = `📡 WIFI: AP (${wSsid}) • ${wIp || '10.42.0.1'}`;
+            wifiColor = '#f59e0b';
+            wifiBorder = '#f59e0b';
+          } else if (wMode === 'client') {
+            wifiText = `📶 WIFI: ${wSsid} • ${wIp || '--'}`;
+            wifiColor = '#10b981';
+            wifiBorder = '#10b981';
+          }
+
           // 1. Synchronize Robot LCD View-Only Display
           if (isLCD) {
             document.getElementById('lcd_cam_state_badge').innerText = 'STATE: ' + stateStr;
@@ -2787,12 +2816,22 @@ HTML_PAGE = """<!DOCTYPE html>
             document.getElementById('lcd_hud_vlm').innerText = lcdYoloeText;
             document.getElementById('lcd_hud_link').innerText = d.connected ? '● ONLINE' : '○ DISCONNECTED';
             document.getElementById('lcd_hud_link').style.color = d.connected ? '#4ade80' : '#ef4444';
+            const lcdHudWifi = document.getElementById('lcd_hud_wifi');
+            if (lcdHudWifi) {
+              lcdHudWifi.innerText = (wMode === 'hotspot') ? `📡 AP: ${wSsid}` : ((wMode === 'client') ? `📶 ${wSsid}` : '○ OFFLINE');
+              lcdHudWifi.style.color = wifiColor;
+            }
 
             document.getElementById('lcd_g_arm').innerText = `S1: ${d.s1}° | S2: ${d.s2}° | S3: ${d.s3}°`;
             document.getElementById('lcd_g_motors').innerText = `LEFT: ${d.left_pwm} PWM | RIGHT: ${d.right_pwm} PWM`;
             document.getElementById('lcd_g_motors_sub').innerText = (d.left_pwm || d.right_pwm) ? 'Chassis: Active Driving' : 'Chassis: Stopped (Standby)';
             document.getElementById('lcd_g_link').innerText = d.connected ? '● HC-05 BLUETOOTH CONNECTED' : '○ BLUETOOTH OFFLINE';
             document.getElementById('lcd_g_link').style.color = d.connected ? '#4ade80' : '#ef4444';
+            const lcdGWifi = document.getElementById('lcd_g_wifi');
+            if (lcdGWifi) {
+              lcdGWifi.innerText = wifiText;
+              lcdGWifi.style.color = wifiColor;
+            }
             document.getElementById('lcd_g_ping').innerText = `Ping Latency: ${d.ping_ms} ms | Port: /dev/rfcomm0`;
             document.getElementById('lcd_g_vlm').innerText = lcdYoloeText;
             document.getElementById('lcd_g_vlm_details').innerText = objName !== 'NONE' ?
@@ -2831,6 +2870,19 @@ HTML_PAGE = """<!DOCTYPE html>
 
             // State & Mission control button
             document.getElementById('web_state_pill').innerText = 'STATE: ' + stateStr;
+            const btPill = document.getElementById('web_bt_pill');
+            if (btPill) {
+              btPill.innerText = d.connected ? '● BT: HC-05 ONLINE' : '○ BT: OFFLINE';
+              btPill.style.color = d.connected ? '#4ade80' : '#ef4444';
+              btPill.style.borderColor = d.connected ? '#4ade80' : '#ef4444';
+            }
+            const wifiPill = document.getElementById('web_wifi_pill');
+            if (wifiPill) {
+              wifiPill.innerText = wifiText;
+              wifiPill.style.color = wifiColor;
+              wifiPill.style.borderColor = wifiBorder;
+            }
+
             const btnAuto = document.getElementById('btn_auto_pick');
             if (autoRunning) {
               btnAuto.innerText = '⏸ PAUSE AUTO';
@@ -4424,6 +4476,7 @@ HTML_PAGE = """<!DOCTYPE html>
           btn.disabled = false;
           btn.innerText = '🔗 Connect to Network';
         }
+        showToast('msg_wifi_connect', `Network error connecting: ${e}`, '#ef4444');
         if (window.location.hostname === '10.42.0.1') {
           showWiFiSwitchingModal(ssid);
         } else {
@@ -5037,7 +5090,8 @@ class WebHandler(BaseHTTPRequestHandler):
                 "vlm_auto_advisory": vlm_auto_advisory,
                 "servo_cal": get_servo_cal_dict(),
                 "servo_cal_mtime": _robot_config_mtime,
-                "server_start_time": _SERVER_START_TIME
+                "server_start_time": _SERVER_START_TIME,
+                "wifi": wifi_manager.get_wifi_status(cached=True)
             })
 
         elif parsed.path == "/api/servo_cal":

@@ -99,8 +99,19 @@ def get_current_ip() -> str:
     return "Disconnected"
 
 
-def get_wifi_status() -> Dict[str, Any]:
-    """Inspects live wireless device status via nmcli."""
+_cached_wifi_status: Optional[Dict[str, Any]] = None
+_last_wifi_status_time: float = 0.0
+_wifi_status_lock = threading.Lock()
+
+
+def get_wifi_status(cached: bool = True) -> Dict[str, Any]:
+    """Inspects live wireless device status via nmcli with optional 2-second caching."""
+    global _cached_wifi_status, _last_wifi_status_time
+    now = time.time()
+    if cached and _cached_wifi_status is not None and (now - _last_wifi_status_time < 2.0):
+        with _wifi_status_lock:
+            return dict(_cached_wifi_status)
+
     res = {
         "mode": "disconnected",
         "ssid": "None",
@@ -121,7 +132,7 @@ def get_wifi_status() -> Dict[str, Any]:
                 con_name = parts[0]
                 if "hotspot" in con_name.lower() or "ap" in con_name.lower():
                     res["mode"] = "hotspot"
-                    res["ssid"] = load_network_config().get("ap_ssid", "egrabbot-ap")
+                    res["ssid"] = load_network_config().get("ap_ssid", "Erovoutika_Grab_Bot")
                 else:
                     res["mode"] = "client"
                     res["ssid"] = con_name
@@ -142,6 +153,10 @@ def get_wifi_status() -> Dict[str, Any]:
                     break
     except Exception as e:
         print(f"[WiFiManager] Status error: {e}")
+
+    with _wifi_status_lock:
+        _cached_wifi_status = dict(res)
+        _last_wifi_status_time = now
 
     return res
 
@@ -385,6 +400,13 @@ def activate_hotspot(ssid: Optional[str] = None, password: Optional[str] = None)
     ap_ssid = ssid.strip() if ssid else cfg.get("ap_ssid", "Erovoutika_Grab_Bot")
     ap_pwd = password.strip() if password else cfg.get("ap_password", "egrabbot1234")
 
+    # Seamless switch: Disconnect active wifi client connection on wlan0 first
+    saved = get_saved_wifi_connections()
+    for con in saved:
+        try:
+            run_cmd(["sudo", "nmcli", "con", "down", con], timeout_s=4.0)
+        except Exception:
+            pass
     # Cleanly disconnect active connection on wlan0
     run_cmd(["sudo", "nmcli", "dev", "disconnect", "wlan0"], timeout_s=5.0)
 
@@ -435,20 +457,84 @@ def set_startup_mode(mode: str) -> Dict[str, Any]:
     return {"status": "ok", "startup_mode": mode}
 
 
-def init_startup_network():
-    """Initializes wireless networking on startup according to configuration."""
+def init_startup_network() -> Dict[str, Any]:
+    """Initializes wireless networking on startup with robust fail-safe.
+    
+    If configured for AP mode, starts the Access Point Hotspot immediately.
+    If configured for WiFi client mode:
+      1. Checks if NetworkManager already connected to an authorized network on boot.
+      2. If not, attempts to bring up last_connected_ssid or other saved profiles.
+      3. Verifies a valid IP lease.
+    FAIL-SAFE: If the robot does not connect to any WiFi network or fails,
+    it automatically falls back to Access Point (AP) Hotspot mode by default.
+    """
     cfg = load_network_config()
     target_mode = cfg.get("startup_mode", "ap")
-    print(f"[WiFiManager] Initializing network in '{target_mode}' mode...")
+    print(f"[WiFiManager] Initializing network (startup_mode='{target_mode}')...")
 
     if target_mode == "ap":
         res = activate_hotspot(cfg.get("ap_ssid"), cfg.get("ap_password"))
-        print(f"[WiFiManager] Hotspot init result: {res}")
-    else:
-        last_ssid = cfg.get("last_connected_ssid")
-        if last_ssid:
-            print(f"[WiFiManager] Bringing up saved WiFi: {last_ssid}")
-            run_cmd(["sudo", "nmcli", "con", "up", last_ssid], timeout_s=15.0)
+        print(f"[WiFiManager] AP Hotspot mode initialized: {res}")
+        return res
+
+    # Check if NetworkManager already connected to WiFi on its own
+    active_con = get_active_wifi_connection()
+    current_ip = get_current_ip()
+    if active_con and active_con != "egrabbot-hotspot" and current_ip not in ("Disconnected", "10.42.0.1") and not current_ip.startswith("127."):
+        print(f"[WiFiManager] Already connected to WiFi '{active_con}' on boot! IP: {current_ip}")
+        cfg["last_connected_ssid"] = active_con
+        save_network_config(cfg)
+        return {"status": "ok", "mode": "client", "ssid": active_con, "ip": current_ip}
+
+    # Attempt connection to last_connected_ssid
+    last_ssid = cfg.get("last_connected_ssid")
+    wifi_connected = False
+    connected_ip = ""
+
+    if last_ssid:
+        print(f"[WiFiManager] Attempting boot connection to saved WiFi: '{last_ssid}'...")
+        up_proc = run_cmd(["sudo", "nmcli", "con", "up", last_ssid], timeout_s=15.0)
+        if up_proc.returncode == 0:
+            for _ in range(6):
+                time.sleep(1.0)
+                ip = get_current_ip()
+                if ip not in ("Disconnected", "10.42.0.1") and not ip.startswith("127."):
+                    wifi_connected = True
+                    connected_ip = ip
+                    break
+
+    # If last_ssid failed, try other saved connections
+    if not wifi_connected:
+        saved_list = get_saved_wifi_connections()
+        for s in saved_list:
+            if s != last_ssid:
+                print(f"[WiFiManager] Trying alternate saved WiFi profile: '{s}'...")
+                up = run_cmd(["sudo", "nmcli", "con", "up", s], timeout_s=12.0)
+                if up.returncode == 0:
+                    for _ in range(6):
+                        time.sleep(1.0)
+                        ip = get_current_ip()
+                        if ip not in ("Disconnected", "10.42.0.1") and not ip.startswith("127."):
+                            wifi_connected = True
+                            connected_ip = ip
+                            last_ssid = s
+                            cfg["last_connected_ssid"] = s
+                            save_network_config(cfg)
+                            break
+                if wifi_connected:
+                    break
+
+    if wifi_connected:
+        print(f"[WiFiManager] Successfully connected to WiFi '{last_ssid}' on boot! IP: {connected_ip}")
+        return {"status": "ok", "mode": "client", "ssid": last_ssid, "ip": connected_ip}
+
+    # FAIL-SAFE FALLBACK: No WiFi connected -> Default to AP Hotspot mode!
+    print("[WiFiManager] ⚠️ FAIL-SAFE TRIGGERED: Robot failed to connect to any WiFi network on boot.")
+    print("[WiFiManager] Automatically activating Access Point (AP) Hotspot mode by default...")
+    res = activate_hotspot(cfg.get("ap_ssid"), cfg.get("ap_password"))
+    res["fail_safe_triggered"] = True
+    print(f"[WiFiManager] Fail-safe AP Hotspot activated: {res}")
+    return res
 
 
 if __name__ == "__main__":

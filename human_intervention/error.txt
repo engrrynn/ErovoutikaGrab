@@ -300,4 +300,23 @@ cant connect to another wifi from AP mode
 
 
 
+add a telemetry in web and desktop gui in what wifi the grabbot is using whether ap or wifi, join it with bt telemtry connection and there should be a fail safe every boot if ever the robot doesnt connect to any wifi or fails it goes to AP by default
+- RESOLUTION:
+  1. Boot Fail-Safe (Automatic AP Hotspot Fallback):
+     - In `scripts/wifi_manager.py` `init_startup_network()` (executed at boot by `egrabbot-wifi-init.service`):
+       * If configured for AP mode, starts the Access Point Hotspot immediately.
+       * If configured for WiFi mode, verifies if already connected or attempts to connect to `last_connected_ssid` or saved profiles, checking for valid DHCP IP lease.
+       * If connection fails, times out, or has no IP lease: triggers **FAIL-SAFE FALLBACK**, automatically activating Access Point (AP) Hotspot mode (`Erovoutika_Grab_Bot`) by default so the robot is never stranded or unreachable on boot.
+  2. Desktop GUI WiFi Telemetry (`src/ui/hud_dashboard.py`):
+     - Upgraded Microcontroller group to `Microcontroller & Wireless Comms`.
+     - Added `lbl_wifi_status` placed directly adjacent to `lbl_bt_status`.
+     - Dynamically updates live mode, SSID, and IP (Gold for AP mode, Green for Client WiFi, Red for Disconnected).
+  3. Web Dashboard WiFi Telemetry (`scripts/web_interface.py`):
+     - Added `"wifi": wifi_manager.get_wifi_status(cached=True)` into `/api/telemetry` payload with 2-second caching to prevent subshell overhead on fast polling loops.
+     - In Web Cockpit Mission Bar: joined `web_wifi_pill` directly with `web_bt_pill` and `web_state_pill`.
+     - In Robot LCD HUD (fullscreen camera & gauges views): added `lcd_hud_wifi` and `lcd_g_wifi` joined with Bluetooth status.
+  4. Verified with 21 unit tests across `tests/test_wifi_manager.py` and `tests/test_web_interface.py` (all passed).
+
+
 when idle the system should check if the gripper is closed, it should go back to open when idle
+

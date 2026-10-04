@@ -14,6 +14,11 @@ from PyQt5.QtWidgets import (
 from src.core.context import RobotContext
 from src.core.state_machine import AutonomousStateMachine, RobotState
 
+try:
+    import scripts.wifi_manager as wifi_manager
+except ImportError:
+    wifi_manager = None
+
 LOGO_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "company_asset", "Erovoutika-Light-Logo-1.webp"))
 _CACHED_HUD_LOGO: Optional[np.ndarray] = None
 
@@ -126,18 +131,24 @@ class HUDDashboard(QMainWindow):
         panel_layout.addWidget(vlm_group)
 
         # 3. Hardware & Comms Telemetry Card
-        telem_group = QGroupBox("Microcontroller Telemetry")
+        telem_group = QGroupBox("Microcontroller & Wireless Comms")
         telem_layout = QGridLayout(telem_group)
 
-        self.lbl_bt_status = QLabel("Link: Disconnected")
+        self.lbl_bt_status = QLabel("BT Link: Disconnected")
+        self.lbl_wifi_status = QLabel("WiFi: Checking...")
         self.lbl_ping = QLabel("Ping: -- ms")
         self.lbl_motors = QLabel("PWM (L/R): 0 / 0")
         self.lbl_servos = QLabel("Servos (S1/S2/S3): 20° / 70° / 170°")
 
+        self._last_wifi_check_time = 0.0
+        self._cached_wifi_text = "WiFi: Checking..."
+        self._cached_wifi_style = "color: #94A3B8; font-weight: bold;"
+
         telem_layout.addWidget(self.lbl_bt_status, 0, 0)
-        telem_layout.addWidget(self.lbl_ping, 0, 1)
-        telem_layout.addWidget(self.lbl_motors, 1, 0)
-        telem_layout.addWidget(self.lbl_servos, 1, 1)
+        telem_layout.addWidget(self.lbl_wifi_status, 0, 1)
+        telem_layout.addWidget(self.lbl_ping, 1, 0)
+        telem_layout.addWidget(self.lbl_motors, 1, 1)
+        telem_layout.addWidget(self.lbl_servos, 2, 0, 1, 2)
         panel_layout.addWidget(telem_group)
 
         # 4. Action Controls
@@ -313,12 +324,36 @@ class HUDDashboard(QMainWindow):
         # 2. Update telemetry labels
         telem = self.context.get_telemetry()
         if telem.connected:
-            self.lbl_bt_status.setText("Link: Connected (BT)")
+            self.lbl_bt_status.setText("BT Link: Connected (HC-05)")
             self.lbl_bt_status.setStyleSheet("color: #4ADE80; font-weight: bold;")
             self.lbl_ping.setText(f"Ping: {telem.ping_ms} ms")
         else:
-            self.lbl_bt_status.setText("Link: Disconnected")
+            self.lbl_bt_status.setText("BT Link: Disconnected")
             self.lbl_bt_status.setStyleSheet("color: #F87171; font-weight: bold;")
+            self.lbl_ping.setText("Ping: -- ms")
+
+        # Update Wi-Fi Telemetry joined with BT
+        now = time.time()
+        if wifi_manager and (now - self._last_wifi_check_time > 1.5):
+            self._last_wifi_check_time = now
+            try:
+                wstatus = wifi_manager.get_wifi_status(cached=True)
+                wmode = (wstatus.get("mode") or "disconnected").lower()
+                wssid = wstatus.get("ssid") or "None"
+                wip = wstatus.get("ip") or ""
+                if wmode == "hotspot":
+                    self._cached_wifi_text = f"WiFi: 📡 AP ({wssid})"
+                    self._cached_wifi_style = "color: #F59E0B; font-weight: bold;"
+                elif wmode == "client":
+                    self._cached_wifi_text = f"WiFi: 📶 {wssid}"
+                    self._cached_wifi_style = "color: #4ADE80; font-weight: bold;"
+                else:
+                    self._cached_wifi_text = "WiFi: Disconnected"
+                    self._cached_wifi_style = "color: #F87171; font-weight: bold;"
+            except Exception:
+                pass
+        self.lbl_wifi_status.setText(self._cached_wifi_text)
+        self.lbl_wifi_status.setStyleSheet(self._cached_wifi_style)
 
         self.lbl_motors.setText(f"PWM (L/R): {telem.left_pwm} / {telem.right_pwm}")
         self.lbl_servos.setText(f"Servos: S1={telem.s1_shoulder}° S2={telem.s2_elbow}° S3={telem.s3_gripper}°")
