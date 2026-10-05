@@ -923,6 +923,14 @@ def stop_autonomous_mode():
         state_machine.stop()
     if comm:
         comm.send_stop()
+    if arm:
+        try:
+            s3_open = getattr(arm, "s3_open", 170)
+            cur_s3 = getattr(arm, "cur_s3", s3_open)
+            if abs(cur_s3 - s3_open) > 10:
+                arm.open_gripper()
+        except Exception:
+            pass
 
 
 def get_robot_state_name():
@@ -1457,7 +1465,7 @@ HTML_PAGE = """<!DOCTYPE html>
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
 
-    .btn { background: #1e3a8a; color: #fff; border: 1px solid #3b82f6; border-radius: 6px; padding: 10px; font-weight: bold; font-size: 13px; cursor: pointer; transition: all 0.15s; text-align: center; }
+    .btn { background: #1e3a8a; color: #fff; border: 1px solid #3b82f6; border-radius: 6px; padding: 10px; font-weight: bold; font-size: 13px; cursor: pointer; transition: all 0.15s; text-align: center; touch-action: manipulation; }
     .btn:hover { background: #2563eb; }
     .btn:active { transform: scale(0.97); }
     .btn-green { background: #065f46; border-color: #059669; color: #fff; }
@@ -1467,11 +1475,173 @@ HTML_PAGE = """<!DOCTYPE html>
     .btn-accent { background: #0284c7; border-color: #38bdf8; color: #fff; }
     .btn-accent:hover { background: #38bdf8; color: #070d1d; }
 
-    .dpad-container { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; }
+    .dpad-container { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; touch-action: manipulation; }
     .dpad-row { display: flex; gap: 8px; }
-    .dpad-btn { width: 70px; height: 55px; font-size: 18px; display: flex; align-items: center; justify-content: center; user-select: none; }
+    .dpad-btn { width: 70px; height: 55px; font-size: 18px; display: flex; align-items: center; justify-content: center; user-select: none; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
     
     .toast { min-height: 20px; font-size: 12px; color: var(--green); text-align: center; }
+
+    /* =========================================================
+       RESPONSIVE ADAPTATIONS FOR MOBILE PHONES & TABLETS
+       ========================================================= */
+    @media (max-width: 768px) {
+      body {
+        padding: 8px 6px;
+      }
+
+      /* Mobile Header */
+      .cockpit-header {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 8px 10px;
+        gap: 8px;
+        border-radius: 6px;
+      }
+      .logo-area {
+        justify-content: space-between;
+        width: 100%;
+      }
+      .logo-area h1 {
+        font-size: 15px;
+      }
+      .logo-area img {
+        height: 26px;
+      }
+      .url-badge {
+        font-size: 11px;
+        padding: 2px 6px;
+      }
+      .feed-switch-bar {
+        justify-content: center;
+        width: 100%;
+        padding: 4px;
+        box-sizing: border-box;
+      }
+      .switch-pill-btn {
+        padding: 6px 10px;
+        font-size: 12px;
+        flex: 1;
+        text-align: center;
+      }
+      .cockpit-header > div:last-child {
+        display: flex;
+        justify-content: stretch;
+        gap: 6px;
+        width: 100%;
+      }
+      .cockpit-header > div:last-child .btn {
+        flex: 1;
+        padding: 6px 4px;
+        font-size: 11px;
+        text-align: center;
+      }
+
+      /* Mobile Mission Control Bar */
+      .cockpit-mission-bar {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 8px 10px;
+        gap: 8px;
+        border-radius: 6px;
+      }
+      .cockpit-mission-bar > div:first-child {
+        display: flex;
+        justify-content: center;
+        gap: 6px;
+        width: 100%;
+        flex-wrap: wrap;
+      }
+      .state-pill {
+        font-size: 12px;
+        padding: 4px 10px;
+      }
+      .mission-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 6px;
+        width: 100%;
+      }
+      .mission-actions .btn {
+        padding: 8px 4px;
+        font-size: 11px;
+        white-space: normal;
+        line-height: 1.2;
+      }
+
+      /* Swipeable Horizontal Tab Navigation Bar */
+      .tabs {
+        display: flex;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        gap: 6px;
+        padding-bottom: 6px;
+        margin-bottom: 8px;
+        width: 100%;
+      }
+      .tabs::-webkit-scrollbar {
+        display: none;
+      }
+      .tab-btn {
+        flex: 0 0 auto;
+        font-size: 12px;
+        padding: 6px 12px;
+        border-radius: 6px;
+      }
+
+      /* Full Width Cards & Grids on Mobile */
+      .main-grid,
+      .cockpit-tab-content,
+      #tab-activities {
+        grid-template-columns: 1fr !important;
+        gap: 10px;
+        width: 100%;
+      }
+      .card {
+        padding: 12px;
+        gap: 10px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .card-title {
+        font-size: 14px;
+      }
+
+      /* Touch Friendly D-Pad */
+      .dpad-container {
+        padding: 6px 0;
+      }
+      .dpad-btn {
+        width: 65px;
+        height: 52px;
+        font-size: 20px;
+      }
+
+      /* Single column responsive buttons */
+      .grid-2 {
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .mission-actions {
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
+      .logo-area h1 {
+        font-size: 14px;
+      }
+      .url-badge {
+        display: none;
+      }
+      .dpad-btn {
+        width: 60px;
+        height: 48px;
+        font-size: 18px;
+      }
+    }
   </style>
   <script>
     function switchTab(tabId, btn) {

@@ -49,10 +49,10 @@ class HUDDashboard(QMainWindow):
         self.resize(1280, 720)
         self.setStyleSheet("""
             QMainWindow { background-color: #0b142a; color: #E0E0E0; font-family: 'DejaVu Sans', sans-serif; }
-            QGroupBox { border: 1px solid #1e3a8a; border-radius: 6px; margin-top: 10px; font-weight: bold; color: #3b82f6; }
+            QGroupBox { border: 1px solid #1e3a8a; border-radius: 6px; margin-top: 8px; font-weight: bold; color: #3b82f6; font-size: 13px; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-            QLabel { color: #CFD8DC; font-size: 13px; }
-            QPushButton { background-color: #111c44; border: 1px solid #1e3a8a; border-radius: 4px; color: #F8FAFC; padding: 6px; font-weight: bold; }
+            QLabel { color: #CFD8DC; font-size: 12px; }
+            QPushButton { background-color: #111c44; border: 1px solid #1e3a8a; border-radius: 4px; color: #F8FAFC; padding: 6px; font-weight: bold; font-size: 12px; }
             QPushButton:hover { background-color: #1e3a8a; }
             QPushButton:pressed { background-color: #2563eb; }
             QProgressBar { border: 1px solid #1e3a8a; border-radius: 4px; text-align: center; color: white; background: #070d1d; }
@@ -87,22 +87,24 @@ class HUDDashboard(QMainWindow):
 
         self.video_label = QLabel("Awaiting Video Stream...")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setMinimumSize(640, 480)
+        self.video_label.setMinimumSize(480, 360)
         video_layout.addWidget(self.video_label)
-        main_layout.addWidget(video_frame, stretch=7)
+        main_layout.addWidget(video_frame, stretch=6)
 
         # Right: Telemetry & Controls Panel
         panel = QWidget()
+        panel.setMinimumWidth(360)
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
-        panel_layout.setSpacing(10)
+        panel_layout.setSpacing(8)
 
         # 1. Autonomous Status Pill
         self.state_pill = QLabel("STATE: IDLE")
         self.state_pill.setAlignment(Qt.AlignCenter)
+        self.state_pill.setWordWrap(True)
         self.state_pill.setStyleSheet("""
-            background-color: #111c44; color: #60a5fa; font-size: 16px; font-weight: bold;
-            border: 2px solid #3b82f6; border-radius: 6px; padding: 8px;
+            background-color: #111c44; color: #60a5fa; font-size: 15px; font-weight: bold;
+            border: 2px solid #3b82f6; border-radius: 6px; padding: 7px;
         """)
         panel_layout.addWidget(self.state_pill)
 
@@ -111,13 +113,16 @@ class HUDDashboard(QMainWindow):
         vlm_layout = QVBoxLayout(vlm_group)
 
         self.cat_name_label = QLabel("Object: Scanning for targets...")
-        self.cat_name_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #60a5fa;")
+        self.cat_name_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #60a5fa;")
+        self.cat_name_label.setWordWrap(True)
         vlm_layout.addWidget(self.cat_name_label)
 
         self.lbl_yoloe_pickable = QLabel("Pickable: --")
+        self.lbl_yoloe_pickable.setWordWrap(True)
         vlm_layout.addWidget(self.lbl_yoloe_pickable)
 
         self.lbl_yoloe_align = QLabel("Sweet Spot: --")
+        self.lbl_yoloe_align.setWordWrap(True)
         vlm_layout.addWidget(self.lbl_yoloe_align)
 
         self.conf_bar = QProgressBar()
@@ -127,28 +132,36 @@ class HUDDashboard(QMainWindow):
         vlm_layout.addWidget(self.conf_bar)
 
         self.vlm_latency_label = QLabel("Inference: --")
+        self.vlm_latency_label.setWordWrap(True)
         vlm_layout.addWidget(self.vlm_latency_label)
         panel_layout.addWidget(vlm_group)
 
         # 3. Hardware & Comms Telemetry Card
         telem_group = QGroupBox("Microcontroller & Wireless Comms")
         telem_layout = QGridLayout(telem_group)
+        telem_layout.setSpacing(6)
 
         self.lbl_bt_status = QLabel("BT Link: Disconnected")
+        self.lbl_bt_status.setWordWrap(True)
         self.lbl_wifi_status = QLabel("WiFi: Checking...")
+        self.lbl_wifi_status.setWordWrap(True)
         self.lbl_ping = QLabel("Ping: -- ms")
+        self.lbl_ping.setWordWrap(True)
         self.lbl_motors = QLabel("PWM (L/R): 0 / 0")
+        self.lbl_motors.setWordWrap(True)
         self.lbl_servos = QLabel("Servos (S1/S2/S3): 20° / 70° / 170°")
+        self.lbl_servos.setWordWrap(True)
 
         self._last_wifi_check_time = 0.0
         self._cached_wifi_text = "WiFi: Checking..."
         self._cached_wifi_style = "color: #94A3B8; font-weight: bold;"
 
-        telem_layout.addWidget(self.lbl_bt_status, 0, 0)
-        telem_layout.addWidget(self.lbl_wifi_status, 0, 1)
-        telem_layout.addWidget(self.lbl_ping, 1, 0)
-        telem_layout.addWidget(self.lbl_motors, 1, 1)
-        telem_layout.addWidget(self.lbl_servos, 2, 0, 1, 2)
+        # Dedicated rows for long wireless statuses so text is 100% visible
+        telem_layout.addWidget(self.lbl_bt_status, 0, 0, 1, 2)
+        telem_layout.addWidget(self.lbl_wifi_status, 1, 0, 1, 2)
+        telem_layout.addWidget(self.lbl_ping, 2, 0)
+        telem_layout.addWidget(self.lbl_motors, 2, 1)
+        telem_layout.addWidget(self.lbl_servos, 3, 0, 1, 2)
         panel_layout.addWidget(telem_group)
 
         # 4. Action Controls
@@ -342,10 +355,10 @@ class HUDDashboard(QMainWindow):
                 wssid = wstatus.get("ssid") or "None"
                 wip = wstatus.get("ip") or ""
                 if wmode == "hotspot":
-                    self._cached_wifi_text = f"WiFi: 📡 AP ({wssid})"
+                    self._cached_wifi_text = f"WiFi: 📡 AP ({wssid}) | {wip}" if wip else f"WiFi: 📡 AP ({wssid})"
                     self._cached_wifi_style = "color: #F59E0B; font-weight: bold;"
                 elif wmode == "client":
-                    self._cached_wifi_text = f"WiFi: 📶 {wssid}"
+                    self._cached_wifi_text = f"WiFi: 📶 {wssid} | {wip}" if wip else f"WiFi: 📶 {wssid}"
                     self._cached_wifi_style = "color: #4ADE80; font-weight: bold;"
                 else:
                     self._cached_wifi_text = "WiFi: Disconnected"
@@ -455,7 +468,8 @@ class HUDDashboard(QMainWindow):
                 cv2.polylines(vis, [pts], isClosed=True, color=box_col, thickness=2)
 
             cv2.rectangle(vis, (xmin, ymin), (xmax, ymax), box_col, 2)
-            cv2.putText(vis, f"{det.category} ({det.confidence:.2f})", (xmin, max(20, ymin - 8)),
+            txt_x = max(10, min(w - 220, xmin))
+            cv2.putText(vis, f"{det.category} ({det.confidence:.2f})", (txt_x, max(22, ymin - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_col, 2)
 
             cx, cy = det.center
@@ -467,7 +481,8 @@ class HUDDashboard(QMainWindow):
             cv2.circle(vis, (sx, sy), 5, link_col, -1)
             cv2.line(vis, (sx, sy), (cx, cy), link_col, 2)
             align_txt = f"dx={dx:+d}px [X-CENTERED]" if is_x_centered else f"dx={dx:+d}px [{'TURN RIGHT' if dx > 0 else 'TURN LEFT'}]"
-            cv2.putText(vis, align_txt, (xmin, min(h - 8, ymax + 18)),
+            align_x = max(10, min(w - 240, xmin))
+            cv2.putText(vis, align_txt, (align_x, min(h - 10, ymax + 20)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.48, link_col, 2)
         elif self.context.get_tracked_roi():
             rx, ry, rw, rh = self.context.get_tracked_roi()

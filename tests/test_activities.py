@@ -627,10 +627,10 @@ def test_estimate_ground_distance():
     dist_bottom = manager.estimate_ground_distance(480, 480)
     assert 10.0 <= dist_bottom <= 35.0
 
-    # Middle of screen (y=240) -> horizontal horizon angle (~45 - 65 cm)
+    # Middle of screen (y=240) -> horizontal horizon angle (~90 - 120 cm)
     dist_mid = manager.estimate_ground_distance(240, 480)
     assert dist_mid > dist_bottom
-    assert 40.0 <= dist_mid <= 70.0
+    assert 40.0 <= dist_mid <= 130.0
 
     # Upper horizon (y=100) -> far away (>100 cm)
     dist_high = manager.estimate_ground_distance(100, 480)

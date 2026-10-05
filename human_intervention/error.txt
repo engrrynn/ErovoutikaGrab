@@ -319,4 +319,25 @@ add a telemetry in web and desktop gui in what wifi the grabbot is using whether
 
 
 when idle the system should check if the gripper is closed, it should go back to open when idle
+- RESOLUTION:
+  1. Idle Gripper State Auto-Open Fail-Safe:
+     - In `src/activities/activity_manager.py` `_stop_internal_unsafe()`: queries current `s3` angle against `s3_open` (170°). If closed/deviated (>10° difference), automatically dispatches `arm.open_gripper()` or `comm.send_servos()` to safely restore the gripper to open.
+     - In `src/core/state_machine.py` `_handle_idle()`: added idle check verifying that if `s3` is clamped or closed, it commands an automatic release to open pose.
+     - In `scripts/web_interface.py` `stop_autonomous_mode()`: triggers gripper auto-open upon transitioning out of autonomous modes.
 
+ground distance calibration, arm settle down pose, desktop hud typography, and mobile/desktop responsive web interface:
+- RESOLUTION:
+  1. Ground Distance Estimation & Approach Calibration:
+     - Calibrated ground truth in `src/activities/activity_manager.py` `estimate_ground_distance()`: at bottom edge of frame (y=480px), physical ground contact is ~33.0 cm. Looming scaling accurately scales distance down to gripper reach envelope (13.5 cm) as the object's top edge expands.
+     - Replaced premature stop triggers across all tracking loops with physical clearance conditions (`needs_approach = dist_cm > (target_dist + 1.5)`).
+     - Servo arm lowers to ground pose at startup before detection/approach begins, ensuring accurate depth projection.
+  2. Arc Steering & Differential Kinematics Fix:
+     - In `_apply_trim_direct()`, added guard guaranteeing differential steering intent is preserved (left > right when turning right, right > left when turning left) so chassis trim offset never inverts turn direction.
+     - In `start_activity()`, reset `_arm_last_update_time = 0.0` so initial tracking step executes immediately without latency guard delay.
+  3. Desktop HUD Typography & Full Word Visibility:
+     - Added `setWordWrap(True)` and minimum dimensions across status readouts and telemetry labels in `src/ui/hud_dashboard.py`.
+     - Clamped HUD overlay rendering coordinates to prevent text clipping at screen boundaries.
+  4. Web UI Responsive Layout (Desktop & Mobile):
+     - Added responsive viewport media queries (<=768px, <=480px) in `scripts/web_interface.py`.
+     - Responsive mobile layout includes scrollable horizontal navigation bar, single-column card grids, stacked cockpit headers, and touch-optimized D-pad controls (`touch-action: manipulation`).
+  5. Verified with 51 unit tests across `tests/test_activities.py`, `tests/test_web_interface.py`, and `tests/test_wifi_manager.py` (all passed).

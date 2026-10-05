@@ -111,8 +111,15 @@ class AutonomousStateMachine:
         self.set_state(RobotState.IDLE)
 
     def _handle_idle(self):
-        # In IDLE, do nothing except keep motors stopped
-        pass
+        # In IDLE, keep motors stopped and ensure gripper is opened if closed
+        if hasattr(self, "arm") and self.arm:
+            try:
+                s3_open = getattr(self.arm, "s3_open", 170)
+                cur_s3 = getattr(self.arm, "cur_s3", s3_open)
+                if abs(cur_s3 - s3_open) > 10:
+                    self.arm.open_gripper()
+            except Exception:
+                pass
 
     def _handle_searching(self, frame: Optional[np.ndarray]):
         if frame is None:

@@ -457,20 +457,16 @@ class ActivityManager:
         # For ground pick activities (object/color tracking), the arm is already deployed DOWN in pick pose.
         # It must NOT pitch up towards horizon (sy=247), which falsely settles at 32-35cm distance!
         is_ground_activity = self.active_activity in ("object_tracking", "color_tracking", "color_track_and_classify", "object_sizing")
-        if is_ground_activity and (cur_s1 >= s1_down - 15 and cur_s2 <= s2_down + 15):
-            check_y = ymax if ymax is not None else cy
-            in_grasp_reach = (check_y >= 445)
-            status = "SETTLED_AT_LIMIT" if in_grasp_reach else "APPROACHING_GROUND"
-            err_y = 0 if in_grasp_reach else max(1, 445 - check_y)
-
+        is_motion = bool(self.config.get("motion_enabled", True))
+        if is_ground_activity and is_motion and (cur_s1 >= s1_down - 15 and cur_s2 <= s2_down + 15):
             self._arm_holding = True
             self.telemetry["arm_ik"] = {
                 "s1": s1_down,
                 "s2": s2_down,
-                "error_y": err_y,
-                "vertical_status": status,
+                "error_y": 0,
+                "vertical_status": "SETTLED_AT_LIMIT",
                 "active": True,
-                "status": "SETTLED" if in_grasp_reach else "APPROACHING",
+                "status": "SETTLED",
                 "latency_ms": round(latency_s * 1000, 1),
             }
             return s1_down, s2_down
@@ -681,11 +677,13 @@ class ActivityManager:
             est_turn_dur = max(0.10, min(0.35, 0.08 + (err_mag / float(w // 2)) * 0.20))
             if dist_err > 12.0:
                 # Continuous Arc Steering Stage
-                steer_bias = int(min(25, (err_mag / float(w // 2)) * 25))
+                steer_bias = int(min(35, 14 + (err_mag / float(w // 2)) * 21))
                 if dx > 0:
-                    l_arc, r_arc = min(255, max(t_speed, f_speed + steer_bias)), max(b_speed, f_speed - steer_bias * 2)
+                    l_arc = min(255, max(t_speed, f_speed + steer_bias))
+                    r_arc = max(b_speed, f_speed - steer_bias)
                 else:
-                    l_arc, r_arc = max(b_speed, f_speed - steer_bias * 2), min(255, max(t_speed, f_speed + steer_bias))
+                    l_arc = max(b_speed, f_speed - steer_bias)
+                    r_arc = min(255, max(t_speed, f_speed + steer_bias))
                 stages.append({
                     "stage": 1,
                     "name": f"ARC_ALIGN_{turn_dir}",
@@ -782,20 +780,52 @@ class ActivityManager:
     def motion_enabled(self) -> bool:
         return bool(self.config.get("motion_enabled", True))
 
-    def estimate_ground_distance(self, bottom_y: int, frame_h: int = 480) -> float:
-        """Calculates physically grounded distance (in cm) from camera to floor contact point.
+    def estimate_ground_distance(
+        self,
+        bottom_y: int,
+        frame_h: int = 480,
+        top_y: Optional[int] = None,
+        box_h: Optional[int] = None
+    ) -> float:
+        """Calculates physically grounded distance (in cm) from robot bumper to object contact point.
         
-        Calibrated with camera mount height (14cm), downward tilt (16 deg = 0.28 rad),
-        and 55 deg vertical FOV (fy ~ 460px on 480p).
+        Calibrated with ground truth:
+        - When object base reaches lower frame edge (bottom_y ~ 460-480px on 480p),
+          the physical distance from robot bumper to floor contact is ~32-35cm (calibrated to 33.0cm).
+        - When object is farther away (bottom_y < 460px), trigonometric ground projection maps
+          apparent floor contact to 33cm - 250cm using effective height H_eff = 30.5cm.
+        - When object approaches closer than 33cm, its base extends below the camera's FOV (bottom_y >= 460px).
+          Using object height or top_y, distance scales accurately down into the gripper reach envelope (10.0 - 14.0cm).
         """
         if bottom_y <= 0:
             return 250.0
+
+        if top_y is None and box_h is not None:
+            top_y = max(0, int(bottom_y - box_h))
+
         dy = float(bottom_y - (frame_h / 2.0))
         angle_alpha = math.atan(dy / 460.0)
         total_angle = 0.28 + angle_alpha
         if total_angle <= 0.08:
             return 250.0
-        dist_cm = 14.0 / math.tan(total_angle)
+
+        raw_ground_dist = 30.5 / math.tan(total_angle)
+
+        if bottom_y >= 460:
+            if top_y is not None:
+                # Top of standing object (e.g. bottle):
+                # At 33cm distance, top_y is ~260px.
+                # At 13.5cm (physical grasp reach), top_y is ~110px.
+                if top_y < 260:
+                    fraction = min(1.3, max(0.0, float(260 - top_y) / 150.0))
+                    dist_cm = 33.0 - (fraction * 19.5)
+                else:
+                    dist_cm = 33.0
+            else:
+                dist_cm = min(33.0, raw_ground_dist)
+        else:
+            dist_cm = raw_ground_dist
+
         return float(round(max(10.0, min(250.0, dist_cm)), 1))
 
     def _evaluate_target_dynamics(self, cx: float, cy: float, now: float) -> bool:
@@ -1047,6 +1077,7 @@ class ActivityManager:
                 def _arm_settle_release(dur: float):
                     time.sleep(dur)
                     self._arm_settling = False
+                    self._arm_last_update_time = 0.0
                     self._arm_deploy_event.set()
                     print(f"[Activities] Arm settled after {dur:.1f}s — detection unblocked.")
                 threading.Thread(target=_arm_settle_release, args=(settle_dur,), daemon=True).start()
@@ -1060,6 +1091,9 @@ class ActivityManager:
             if clean_name in ("person_follower", "object_tracking", "color_track_and_classify") and self.camera and self.vision:
                 self._perception_thread = threading.Thread(target=self._perception_worker, daemon=True)
                 self._perception_thread.start()
+
+            # Reset arm update timestamp so the first tracking step is never throttled by the latency guard
+            self._arm_last_update_time = 0.0
 
             self.worker_thread = threading.Thread(target=self._activity_loop, daemon=True)
             self.worker_thread.start()
@@ -1126,6 +1160,7 @@ class ActivityManager:
         self._last_cmd_r = 0
         self._arm_settling = False
         self._arm_settle_until = 0.0
+        self._arm_last_update_time = 0.0
         self._arm_deploy_event.set()  # release any threads blocked on arm deploy wait
         self._perception_thread = None
         with self._vision_lock:
@@ -1166,6 +1201,22 @@ class ActivityManager:
                 self.comm.send_stop()
             except Exception as e:
                 print(f"[Activities] Error sending stop to comm: {e}")
+
+        # Fail-safe: when idle, verify gripper is open; restore to open if closed
+        try:
+            limits = self._get_arm_limits()
+            s3_open = limits.get("s3_open", 170)
+            cur_s3 = limits.get("cur_s3", s3_open)
+            if abs(cur_s3 - s3_open) > 10:
+                if self.arm:
+                    self.arm.open_gripper()
+                elif self.comm:
+                    self.comm.send_servos(limits.get("cur_s1", limits.get("s1_stow", 93)),
+                                          limits.get("cur_s2", limits.get("s2_stow", 45)),
+                                          s3_open)
+        except Exception as e:
+            print(f"[Activities] Idle gripper reset notice: {e}")
+
         return True
 
     def get_status(self) -> Dict[str, Any]:
@@ -1185,9 +1236,23 @@ class ActivityManager:
         return int(lpwm), int(rpwm)
 
     def _apply_trim_direct(self, lpwm: int, rpwm: int) -> Tuple[int, int]:
-        """Applies trim offset to arbitrary left and right PWM values, keeping in valid bounds."""
+        """Applies trim offset to arbitrary left and right PWM values, keeping in valid bounds.
+
+        Guarantees that differential steering intent is never inverted by trim offset.
+        """
         trim = int(self.config.get("trim_offset", 6))
-        return int(max(-255, min(255, lpwm - trim))), int(max(-255, min(255, rpwm + trim)))
+        adj_l = int(max(-255, min(255, lpwm - trim)))
+        adj_r = int(max(-255, min(255, rpwm + trim)))
+
+        # Preserve differential turning intent: if steering left or right, trim must not invert the turn
+        if lpwm > rpwm and adj_l <= adj_r:
+            delta = max(6, lpwm - rpwm)
+            adj_l = min(255, adj_r + delta)
+        elif lpwm < rpwm and adj_r <= adj_l:
+            delta = max(6, rpwm - lpwm)
+            adj_r = min(255, adj_l + delta)
+
+        return adj_l, adj_r
 
     def _compute_diminishing_turn_pwm(self, ex: int, w: int) -> int:
         """Computes diminishing turn PWM scaling down to baseline turn speed floor as error decreases."""
@@ -1520,7 +1585,7 @@ class ActivityManager:
                     if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
                     if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
 
-                if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
+                if ("PIVOT" in action) or ("NUDGE" in action) or ("TURN" in action and not (left_pwm > 0 and right_pwm > 0)):
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
                     elif left_pwm < 0 and left_pwm > -t_speed:
@@ -1547,18 +1612,18 @@ class ActivityManager:
                     if ex > 0:
                         action = "TURN_RIGHT"
                         if dist_action == "APPROACH":
-                            steer_bias = int(min(25, (ex / float(w // 2)) * 25))
+                            steer_bias = int(min(35, 14 + (ex / float(w // 2)) * 21))
                             left_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            right_pwm = max(b_speed, f_speed - steer_bias * 2)
+                            right_pwm = max(b_speed, f_speed - steer_bias)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = turn_pwm, -turn_pwm
                     else:
                         action = "TURN_LEFT"
                         if dist_action == "APPROACH":
-                            steer_bias = int(min(25, (abs(ex) / float(w // 2)) * 25))
+                            steer_bias = int(min(35, 14 + (abs(ex) / float(w // 2)) * 21))
                             right_pwm = min(255, max(t_speed, f_speed + steer_bias))
-                            left_pwm = max(b_speed, f_speed - steer_bias * 2)
+                            left_pwm = max(b_speed, f_speed - steer_bias)
                             continuous_drive = True
                         else:
                             left_pwm, right_pwm = -turn_pwm, turn_pwm
@@ -1726,7 +1791,7 @@ class ActivityManager:
             area_ratio = max_area / total_area
 
             # Calibrated Physical Distance in Centimeters
-            dist_cm = self.estimate_ground_distance(y + bh, h)
+            dist_cm = self.estimate_ground_distance(y + bh, h, top_y=int(y), box_h=int(bh))
             self.telemetry["distance_cm"] = dist_cm
 
             target_area_ratio = float(self.config.get("color_target_area_ratio", 0.08))
@@ -1802,7 +1867,7 @@ class ActivityManager:
                     if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
                     if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
 
-                if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
+                if ("PIVOT" in action) or ("NUDGE" in action) or ("TURN" in action and not (left_pwm > 0 and right_pwm > 0)):
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
                     elif left_pwm < 0 and left_pwm > -t_speed:
@@ -1824,7 +1889,7 @@ class ActivityManager:
                     )
             else:
                 # Fallback if no vlm_planner configured: drive until true grasp reach
-                needs_approach = (dist_cm > (target_dist + 1.5)) and (int(y + bh) < 445)
+                needs_approach = dist_cm > (target_dist + 1.5)
                 if abs(ex) > deadband_x:
                     pulse_dur = max(0.08, min(0.18, 0.08 + (abs(ex) / float(w // 2)) * 0.10))
                     if ex > 0:
@@ -1862,7 +1927,7 @@ class ActivityManager:
             # If target is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 1.5) or (int(y + bh) >= 445)
+            is_near = dist_cm <= (target_dist + 1.5)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")
@@ -2035,7 +2100,7 @@ class ActivityManager:
             h_tol = 0.07
 
             # Calibrated Physical Distance in Centimeters
-            dist_cm = self.estimate_ground_distance(ymax, h)
+            dist_cm = self.estimate_ground_distance(ymax, h, top_y=int(ymin), box_h=int(ymax - ymin))
             self.telemetry["distance_cm"] = dist_cm
 
             target_cy = (ymin + ymax) // 2
@@ -2111,7 +2176,7 @@ class ActivityManager:
                     if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
                     if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
 
-                if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
+                if ("PIVOT" in action) or ("NUDGE" in action) or ("TURN" in action and not (left_pwm > 0 and right_pwm > 0)):
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
                     elif left_pwm < 0 and left_pwm > -t_speed:
@@ -2133,7 +2198,7 @@ class ActivityManager:
                     )
             else:
                 # Fallback if no vlm_planner configured: drive until true grasp reach
-                needs_approach = (dist_cm > (target_dist + 1.5)) and (ymax < 445)
+                needs_approach = dist_cm > (target_dist + 1.5)
                 if abs(ex) > deadband_x:
                     pulse_dur = max(0.08, min(0.18, 0.08 + (abs(ex) / float(w // 2)) * 0.10))
                     if ex > 0:
@@ -2175,7 +2240,7 @@ class ActivityManager:
             # If target object is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 1.5) or (ymax >= 445)
+            is_near = dist_cm <= (target_dist + 1.5)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")
@@ -2364,7 +2429,7 @@ class ActivityManager:
             deadband_x = int(self.config.get("deadband_x", 25))
 
             # Calibrated Physical Distance in Centimeters
-            dist_cm = self.estimate_ground_distance(y + bh, h)
+            dist_cm = self.estimate_ground_distance(y + bh, h, top_y=int(y), box_h=int(bh))
             self.telemetry["distance_cm"] = dist_cm
 
             self.telemetry["target_found"] = True
@@ -2437,7 +2502,7 @@ class ActivityManager:
                     if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
                     if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
 
-                if "TURN" in action or "PIVOT" in action or "NUDGE" in action:
+                if ("PIVOT" in action) or ("NUDGE" in action) or ("TURN" in action and not (left_pwm > 0 and right_pwm > 0)):
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
                     elif left_pwm < 0 and left_pwm > -t_speed:
@@ -2459,7 +2524,7 @@ class ActivityManager:
                     )
             else:
                 # Fallback if no vlm_planner configured: drive until true grasp reach
-                needs_approach = (dist_cm > (target_dist + 1.5)) and (int(y + bh) < 445)
+                needs_approach = dist_cm > (target_dist + 1.5)
                 if abs(ex) > deadband_x:
                     pulse_dur = max(0.08, min(0.18, 0.08 + (abs(ex) / float(w // 2)) * 0.10))
                     if ex > 0:
@@ -2497,7 +2562,7 @@ class ActivityManager:
             # If target is centered horizontally and vertically, within grasp range, and steady:
             is_x_centered = abs(ex) <= deadband_x
             is_y_centered = self.telemetry.get("arm_ik", {}).get("vertical_status") in ("CENTERED", "SETTLED_AT_LIMIT")
-            is_near = (dist_cm <= target_dist + 1.5) or (int(y + bh) >= 445)
+            is_near = dist_cm <= (target_dist + 1.5)
 
             vplan = self.telemetry.get("vlm_plan") or {}
             vlm_action = vplan.get("action", "")
@@ -2673,7 +2738,7 @@ class ActivityManager:
 
             # Update real-time sizing telemetry
             # Calibrated Physical Distance in Centimeters
-            dist_cm = self.estimate_ground_distance(ymax, h)
+            dist_cm = self.estimate_ground_distance(ymax, h, top_y=int(ymin), box_h=int(ymax - ymin))
             self.telemetry["distance_cm"] = dist_cm
             self.telemetry["target_found"] = True
             self.telemetry["target_box"] = [int(ymin), int(xmin), int(ymax), int(xmax)]
@@ -2739,7 +2804,7 @@ class ActivityManager:
                     if left_pwm < 0: left_pwm = min(-b_speed, left_pwm)
                     if right_pwm < 0: right_pwm = min(-b_speed, right_pwm)
 
-                if "TURN" in action or "CENTER" in action or "PIVOT" in action:
+                if ("PIVOT" in action) or ("CENTER" in action and not (left_pwm > 0 and right_pwm > 0)) or ("TURN" in action and not (left_pwm > 0 and right_pwm > 0)):
                     if left_pwm > 0 and left_pwm < t_speed:
                         left_pwm = t_speed
                     elif left_pwm < 0 and left_pwm > -t_speed:
