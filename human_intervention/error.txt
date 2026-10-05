@@ -354,3 +354,15 @@ camera stream delay and motor teleoperation latency in web ui:
      - Upgraded D-pad buttons to unified pointer events (`onpointerdown`, `onpointerup`, `onpointerleave`, `onpointercancel`) to eliminate mobile 300ms touch delay, synthetic ghost clicks, and stuck driving on finger drag.
      - Added state guard debounce in `startDrive` and `stopDrive` to avoid flooding the HTTP server.
      - Paused background watchdog servo pulsing while driving in `BluetoothSerialAdapter._watchdog_loop` to dedicate 100% of 9600-baud serial bandwidth to motor drive packets.
+
+automatic fallback to ap mode when network cannot connect / hud offline:
+- RESOLUTION:
+  1. Runtime Network Health Watchdog (`scripts/wifi_manager.py`):
+     - Added `check_auto_ap_fallback()` and `start_wifi_watchdog()`.
+     - Monitored network status: the moment the network cannot connect to a WiFi network or drops offline, after checking connection, it automatically triggers Access Point (AP Hotspot) mode (`activate_hotspot()`) so the robot remains reachable.
+  2. Fallback on Failed Connection Transitions:
+     - In `_async_transition_worker()`, if connecting to a target WiFi fails and rollback to previous connection fails or is unavailable, immediately falls back to activating AP Hotspot mode.
+  3. HUD & Web Dashboard Integration:
+     - In `src/ui/hud_dashboard.py`: when status is offline / disconnected, displays `WiFi: Offline (Auto-AP checking...)` and invokes `check_auto_ap_fallback()`.
+     - In `scripts/web_interface.py`: starts `wifi_manager.start_wifi_watchdog()` on server boot and triggers auto-AP check in `/api/telemetry` when offline.
+

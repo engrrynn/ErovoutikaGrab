@@ -335,7 +335,13 @@ def _async_transition_worker(ssid: str, password: Optional[str], was_hotspot: bo
             print("[WiFiManager] Access Point Hotspot restored.")
         elif prev_con:
             print(f"[WiFiManager] Watchdog restoring previous connection '{prev_con}'...")
-            run_cmd(["sudo", "nmcli", "con", "up", prev_con], timeout_s=15.0)
+            rb = run_cmd(["sudo", "nmcli", "con", "up", prev_con], timeout_s=12.0)
+            if rb.returncode != 0:
+                print(f"[WiFiManager] Previous connection '{prev_con}' also failed. Auto-fallback to AP Hotspot mode...")
+                activate_hotspot()
+        else:
+            print("[WiFiManager] No previous connection. Auto-fallback to AP Hotspot mode...")
+            activate_hotspot()
 
 
 def connect_to_wifi(ssid: str, password: Optional[str] = None) -> Dict[str, Any]:
@@ -535,6 +541,89 @@ def init_startup_network() -> Dict[str, Any]:
     res["fail_safe_triggered"] = True
     print(f"[WiFiManager] Fail-safe AP Hotspot activated: {res}")
     return res
+
+
+_offline_consecutive_checks = 0
+_auto_ap_in_progress = False
+_wifi_watchdog_started = False
+
+
+def check_auto_ap_fallback(threshold_checks: int = 2) -> bool:
+    """Checks if WiFi cannot connect / is offline, and automatically activates AP mode after checking.
+    
+    If the HUD or system detects the connection is offline or cannot connect,
+    it automatically triggers Access Point (AP Hotspot) mode so the robot remains accessible.
+    """
+    global _offline_consecutive_checks, _auto_ap_in_progress
+    if _auto_ap_in_progress:
+        return True
+
+    # Do not interrupt while explicit user transition is running
+    tr = get_transition_status()
+    if tr.get("status") == "in_progress":
+        return False
+
+    status = get_wifi_status(cached=False)
+    mode = (status.get("mode") or "").lower()
+    ip = status.get("ip") or ""
+
+    # If already in AP hotspot mode, or in client mode with valid IP, reset counter
+    if mode in ("hotspot", "ap"):
+        _offline_consecutive_checks = 0
+        return False
+
+    if mode == "client" and ip not in ("Disconnected", "10.42.0.1", "") and not ip.startswith("127."):
+        _offline_consecutive_checks = 0
+        return False
+
+    # The network cannot connect to a WiFi / is offline
+    _offline_consecutive_checks += 1
+    print(f"[WiFiManager] Connection check: OFFLINE ({_offline_consecutive_checks}/{threshold_checks})")
+
+    if _offline_consecutive_checks >= threshold_checks:
+        _auto_ap_in_progress = True
+        print("[WiFiManager] ⚠️ Network offline after checking connection! Auto-activating AP (Hotspot) mode...")
+        cfg = load_network_config()
+
+        def _worker():
+            global _auto_ap_in_progress, _offline_consecutive_checks
+            try:
+                activate_hotspot(cfg.get("ap_ssid"), cfg.get("ap_password"))
+            except Exception as e:
+                print(f"[WiFiManager] Auto-AP activation error: {e}")
+            finally:
+                _auto_ap_in_progress = False
+                _offline_consecutive_checks = 0
+
+        t = threading.Thread(target=_worker, daemon=True, name="AutoAPFallbackWorker")
+        t.start()
+        return True
+
+    return False
+
+
+def start_wifi_watchdog(check_interval_s: float = 3.0):
+    """Background watchdog thread monitoring network connectivity.
+    
+    The moment the network cannot connect to WiFi and status is offline after checking connection,
+    it automatically falls back to Access Point (AP) mode.
+    """
+    global _wifi_watchdog_started
+    if _wifi_watchdog_started:
+        return
+    _wifi_watchdog_started = True
+
+    def _watchdog_loop():
+        # Startup grace period to allow NetworkManager or init_startup_network to settle
+        time.sleep(4.0)
+        while True:
+            try:
+                time.sleep(check_interval_s)
+                check_auto_ap_fallback(threshold_checks=2)
+            except Exception:
+                time.sleep(3.0)
+
+    threading.Thread(target=_watchdog_loop, daemon=True, name="WiFiHealthWatchdog").start()
 
 
 if __name__ == "__main__":

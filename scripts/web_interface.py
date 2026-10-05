@@ -2973,7 +2973,7 @@ HTML_PAGE = """<!DOCTYPE html>
           const wSsid = w.ssid || 'None';
           const wIp = w.ip || '';
 
-          let wifiText = '○ WIFI: OFFLINE';
+          let wifiText = '○ WIFI: OFFLINE (Auto-AP checking...)';
           let wifiColor = '#ef4444';
           let wifiBorder = '#ef4444';
 
@@ -5318,7 +5318,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 "servo_cal": get_servo_cal_dict(),
                 "servo_cal_mtime": _robot_config_mtime,
                 "server_start_time": _SERVER_START_TIME,
-                "wifi": wifi_manager.get_wifi_status(cached=True)
+                "wifi": (lambda w: (wifi_manager.check_auto_ap_fallback(threshold_checks=2) if (wifi_manager and w.get("mode") == "disconnected" and hasattr(wifi_manager, "check_auto_ap_fallback")) else None, w)[1])(wifi_manager.get_wifi_status(cached=True) if wifi_manager else {})
             })
 
         elif parsed.path == "/api/servo_cal":
@@ -5826,6 +5826,8 @@ def main():
     connect_comm(force_mock=args.mock)
     if not args.mock:
         start_bt_watchdog()
+        if hasattr(wifi_manager, "start_wifi_watchdog"):
+            wifi_manager.start_wifi_watchdog(check_interval_s=3.0)
 
     # 3. Start Background Vision Inference Worker
     start_vision_worker()

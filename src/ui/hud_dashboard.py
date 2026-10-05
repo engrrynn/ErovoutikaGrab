@@ -361,8 +361,15 @@ class HUDDashboard(QMainWindow):
                     self._cached_wifi_text = f"WiFi: 📶 {wssid} | {wip}" if wip else f"WiFi: 📶 {wssid}"
                     self._cached_wifi_style = "color: #4ADE80; font-weight: bold;"
                 else:
-                    self._cached_wifi_text = "WiFi: Disconnected"
-                    self._cached_wifi_style = "color: #F87171; font-weight: bold;"
+                    is_auto_ap = getattr(wifi_manager, "_auto_ap_in_progress", False)
+                    if is_auto_ap:
+                        self._cached_wifi_text = "WiFi: 📡 Restoring AP Mode..."
+                        self._cached_wifi_style = "color: #F59E0B; font-weight: bold;"
+                    else:
+                        self._cached_wifi_text = "WiFi: Offline (Auto-AP checking...)"
+                        self._cached_wifi_style = "color: #F87171; font-weight: bold;"
+                    if hasattr(wifi_manager, "check_auto_ap_fallback"):
+                        wifi_manager.check_auto_ap_fallback(threshold_checks=2)
             except Exception:
                 pass
         self.lbl_wifi_status.setText(self._cached_wifi_text)
