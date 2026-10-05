@@ -266,6 +266,9 @@ class BluetoothSerialAdapter(BaseCommAdapter):
                 time.sleep(interval)
                 if not self._running:
                     break
+                # If motors are actively driving, yield 9600-baud serial bus immediately to drive commands
+                if self._last_drive_cmd and self._last_drive_cmd != (0, 0):
+                    continue
                 if self.is_connected() and self._last_assigned_servos and not getattr(self, "_is_pulsing", False):
                     s1, s2, s3 = self._last_assigned_servos
                     pulse_s3 = s3 + 1 if s3 < 180 else s3 - 1

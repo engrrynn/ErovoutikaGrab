@@ -1673,6 +1673,14 @@ HTML_PAGE = """<!DOCTYPE html>
       if (targetBtn && targetBtn.classList) {
         targetBtn.classList.add('active');
       }
+      var sweetImg = document.getElementById('sweet_spot_cam_img');
+      if (sweetImg) {
+        if (tabId === 'tab-vision') {
+          if (!sweetImg.src || !sweetImg.src.includes('/video_feed')) sweetImg.src = '/video_feed';
+        } else {
+          sweetImg.src = '';
+        }
+      }
     }
     window.switchTab = switchTab;
 
@@ -1690,7 +1698,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <div id="lcd_hud_container">
     <!-- SUB-VIEW 1: FULLSCREEN CAMERA FEED (When Feed Target is LCD) -->
     <div id="lcd_view_camera">
-      <img id="lcd_cam_img" src="/video_feed" alt="Robot LCD Video Feed" />
+      <img id="lcd_cam_img" alt="Robot LCD Video Feed" />
       <div class="lcd-cam-top-bar">
         <div class="lcd-pill-badge" id="lcd_cam_state_badge">STATE: IDLE</div>
       </div>
@@ -1850,13 +1858,13 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="card">
       <div class="card-title">🏎️ Drive Teleoperation (WASD / Touch)</div>
       <div class="dpad-container">
-        <button class="btn dpad-btn" onmousedown="startDrive('F')" onmouseup="stopDrive()" ontouchstart="startDrive('F')" ontouchend="stopDrive()">▲</button>
+        <button class="btn dpad-btn" onpointerdown="startDrive('F')" onpointerup="stopDrive()" onpointerleave="stopDrive()" onpointercancel="stopDrive()">▲</button>
         <div class="dpad-row">
-          <button class="btn dpad-btn" onmousedown="startDrive('L')" onmouseup="stopDrive()" ontouchstart="startDrive('L')" ontouchend="stopDrive()">◀</button>
+          <button class="btn dpad-btn" onpointerdown="startDrive('L')" onpointerup="stopDrive()" onpointerleave="stopDrive()" onpointercancel="stopDrive()">◀</button>
           <button class="btn dpad-btn btn-red" onclick="sendStop()">■</button>
-          <button class="btn dpad-btn" onmousedown="startDrive('R')" onmouseup="stopDrive()" ontouchstart="startDrive('R')" ontouchend="stopDrive()">▶</button>
+          <button class="btn dpad-btn" onpointerdown="startDrive('R')" onpointerup="stopDrive()" onpointerleave="stopDrive()" onpointercancel="stopDrive()">▶</button>
         </div>
-        <button class="btn dpad-btn" onmousedown="startDrive('B')" onmouseup="stopDrive()" ontouchstart="startDrive('B')" ontouchend="stopDrive()">▼</button>
+        <button class="btn dpad-btn" onpointerdown="startDrive('B')" onpointerup="stopDrive()" onpointerleave="stopDrive()" onpointercancel="stopDrive()">▼</button>
       </div>
 
       <div class="card-title" style="margin-top:6px; display:flex; justify-content:space-between; align-items:center;">
@@ -2624,7 +2632,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="card">
       <div class="card-title">🎯 Grasp Sweet Spot Preview</div>
       <div class="video-container" onclick="handleVideoClick(event)">
-        <img src="/video_feed" alt="Video stream" />
+        <img id="sweet_spot_cam_img" alt="Video stream" />
         <div class="video-overlay-text">Tap anywhere to re-center target box</div>
       </div>
     </div>
@@ -2868,6 +2876,10 @@ HTML_PAGE = """<!DOCTYPE html>
     if (isLCD) {
       document.documentElement.classList.add('lcd-view-only');
       document.body.classList.add('lcd-view-only');
+      const lcdImg = document.getElementById('lcd_cam_img');
+      if (lcdImg) lcdImg.src = '/video_feed';
+      const cf = document.getElementById('cam_feed');
+      if (cf) cf.src = '';
     }
 
     const targetTab = urlParams.get('tab');
@@ -3313,19 +3325,38 @@ HTML_PAGE = """<!DOCTYPE html>
         .catch(() => {});
     }, 300);
 
-    // Motor Teleop (Web Cockpit)
+    // Motor Teleop (Web Cockpit) - Fast low-latency debounced dispatch
+    let isDriving = false;
+    let currentDriveDir = null;
+
     function startDrive(dir) {
-      fetch('/api/drive_dir', { method: 'POST', body: JSON.stringify({ dir: dir }) });
+      if (currentDriveDir === dir && isDriving) return;
+      isDriving = true;
+      currentDriveDir = dir;
+      fetch('/api/drive_dir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dir: dir })
+      }).catch(() => {});
     }
     function stopDrive() {
-      fetch('/api/stop', { method: 'POST' });
+      if (!isDriving && currentDriveDir === null) return;
+      isDriving = false;
+      currentDriveDir = null;
+      fetch('/api/stop', { method: 'POST' }).catch(() => {});
     }
     function sendStop() {
-      fetch('/api/stop', { method: 'POST' });
+      isDriving = false;
+      currentDriveDir = null;
+      fetch('/api/stop', { method: 'POST' }).catch(() => {});
       showToast('msg_teleop', 'Robot Motors Stopped.');
     }
     function sendNudge(dir) {
-      fetch('/api/nudge', { method: 'POST', body: JSON.stringify({ dir: dir }) });
+      fetch('/api/nudge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dir: dir })
+      }).catch(() => {});
       showToast('msg_motors', `Nudged ${dir}`);
     }
 
@@ -4740,6 +4771,8 @@ HTML_PAGE = """<!DOCTYPE html>
 
 class DualStackServer(ThreadingHTTPServer):
     """Dual-stack HTTP server accepting both IPv4 and IPv6 requests on the same port."""
+    daemon_threads = True
+
     def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
         host, port = server_address
         if host in ("0.0.0.0", "", "localhost", "127.0.0.1") and socket.has_ipv6:
@@ -4758,6 +4791,14 @@ class DualStackServer(ThreadingHTTPServer):
             except Exception:
                 pass
         super().server_bind()
+
+    def get_request(self):
+        sock, addr = super().get_request()
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+        return sock, addr
 
 
 class Port80RedirectHandler(BaseHTTPRequestHandler):
@@ -4779,6 +4820,14 @@ class Port80RedirectHandler(BaseHTTPRequestHandler):
 
 
 class WebHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError, TimeoutError, OSError):
+            pass
+
     def log_message(self, format, *args):
         if self.path != "/api/telemetry" and not self.path.startswith("/video_feed"):
             client = self.client_address[0] if self.client_address else "unknown"
@@ -4808,6 +4857,10 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
 
     def _read_json(self):
         try:
@@ -4925,6 +4978,9 @@ class WebHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/video_feed":
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.end_headers()
 
             while True:
@@ -5165,15 +5221,16 @@ class WebHandler(BaseHTTPRequestHandler):
                             cv2.putText(vis, arm_text, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 200, 0), 2)
                     except Exception as act_draw_err:
                         print(f"[Web] Error drawing activity overlay: {act_draw_err}")
-                ret, jpeg = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                ret, jpeg = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 55])
                 if not ret:
-                    time.sleep(0.05)
+                    time.sleep(0.02)
                     continue
 
                 b = jpeg.tobytes()
                 try:
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(b)).encode() + b"\r\n\r\n" + b + b"\r\n")
-                    time.sleep(0.04)  # ~25 FPS
+                    self.wfile.flush()
+                    time.sleep(0.033)  # ~30 FPS
                 except (BrokenPipeError, ConnectionResetError):
                     break
 
@@ -5781,6 +5838,7 @@ def main():
     except Exception as e:
         print(f"[Web] DualStack binding failed ({e}), using IPv4 on {args.host}:{args.port}")
         httpd = ThreadingHTTPServer((args.host, args.port), WebHandler)
+    httpd.daemon_threads = True
 
     # SSL / HTTPS Configuration
     use_ssl = False
