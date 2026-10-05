@@ -341,3 +341,16 @@ ground distance calibration, arm settle down pose, desktop hud typography, and m
      - Added responsive viewport media queries (<=768px, <=480px) in `scripts/web_interface.py`.
      - Responsive mobile layout includes scrollable horizontal navigation bar, single-column card grids, stacked cockpit headers, and touch-optimized D-pad controls (`touch-action: manipulation`).
   5. Verified with 51 unit tests across `tests/test_activities.py`, `tests/test_web_interface.py`, and `tests/test_wifi_manager.py` (all passed).
+
+camera stream delay and motor teleoperation latency in web ui:
+- RESOLUTION:
+  1. Elimination of Redundant Video Streams:
+     - Removed static `src="/video_feed"` on `#lcd_cam_img` and Tab 4 `#sweet_spot_cam_img` so browsers stream only 1 camera feed instead of 3 duplicate feeds simultaneously, freeing browser connection pools and cutting CPU/network usage by 66%.
+  2. TCP Low-Latency & Immediate Frame Flushing:
+     - Configured `TCP_NODELAY` on `DualStackServer` sockets to eliminate Nagle's algorithm packet delay.
+     - Added immediate `self.wfile.flush()` after each MJPEG frame and JSON response.
+     - Added `Cache-Control: no-cache, no-store, must-revalidate` and tuned JPEG quality to 55 to reduce frame encoding time and payload size.
+  3. Responsive Motor Control & Mobile D-Pad Pointer Events:
+     - Upgraded D-pad buttons to unified pointer events (`onpointerdown`, `onpointerup`, `onpointerleave`, `onpointercancel`) to eliminate mobile 300ms touch delay, synthetic ghost clicks, and stuck driving on finger drag.
+     - Added state guard debounce in `startDrive` and `stopDrive` to avoid flooding the HTTP server.
+     - Paused background watchdog servo pulsing while driving in `BluetoothSerialAdapter._watchdog_loop` to dedicate 100% of 9600-baud serial bandwidth to motor drive packets.
